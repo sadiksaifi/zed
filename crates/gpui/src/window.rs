@@ -6,8 +6,8 @@ use crate::Inspector;
 use crate::profiler;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow,
-    Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
+    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
+    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
     DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
@@ -15,7 +15,7 @@ use crate::{
     MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
     PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
     Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
+    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, Rgba, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
     SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
@@ -4435,6 +4435,60 @@ impl Window {
                 outside_only: outside_only.into(),
             });
         }
+    }
+
+    /// Paint a backdrop filter over the pixels already painted beneath `bounds`.
+    ///
+    /// A positive `radius` blurs with that Gaussian sigma in logical pixels, capped at 64
+    /// device pixels. `tone` constrains filtered premultiplied color to the range that the
+    /// same source-over color admits, without adding coverage. `alpha_limit` caps coverage
+    /// while preserving straight color, which reveals the native window backing in
+    /// transparent windows.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_backdrop_filter(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        radius: Pixels,
+        mut tone: Rgba,
+        alpha_limit: f32,
+    ) {
+        const MAX_BACKDROP_BLUR_RADIUS: f32 = 64.;
+
+        self.invalidator.debug_assert_paint();
+
+        let opacity = self.element_opacity();
+        if !radius.0.is_finite() || radius.0 < 0. || !opacity.is_finite() || opacity <= 0. {
+            return;
+        }
+        for channel in [&mut tone.r, &mut tone.g, &mut tone.b, &mut tone.a] {
+            *channel = if channel.is_finite() {
+                channel.clamp(0., 1.)
+            } else {
+                0.
+            };
+        }
+        let alpha_limit = if alpha_limit.is_finite() {
+            alpha_limit.clamp(0., 1.)
+        } else {
+            1.
+        };
+        if radius.0 == 0. && tone.a == 0. && alpha_limit == 1. {
+            return;
+        }
+
+        let scale_factor = self.scale_factor();
+        self.next_frame.scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: self.snap_bounds(bounds),
+            content_mask: self.snapped_content_mask(),
+            corner_radii: corner_radii.scale(scale_factor),
+            radius: ScaledPixels((radius.0 * scale_factor).min(MAX_BACKDROP_BLUR_RADIUS)),
+            opacity: opacity.min(1.),
+            tone,
+            alpha_limit,
+        });
     }
 
     /// Paint the inset shadows from `shadows` into the scene at the current z-index. Should

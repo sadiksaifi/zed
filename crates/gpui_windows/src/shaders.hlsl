@@ -1270,3 +1270,113 @@ float4 polychrome_sprite_fragment(PolychromeSpriteFragmentInput input): SV_Targe
     color.a *= sprite.opacity * saturate(0.5 - distance);
     return color;
 }
+
+/*
+**
+**              Backdrop filters
+**
+*/
+
+// Matches `gpui::BackdropUniforms`. HLSL packing places each `float4` on a 16-byte
+// register, which matches the Rust layout.
+cbuffer BackdropUniforms: register(b2) {
+    float2 backdrop_target_size;
+    float2 backdrop_source_size;
+    float2 backdrop_source_active_size;
+    float2 backdrop_snapshot_size;
+    float2 backdrop_snapshot_active_size;
+    float2 backdrop_snapshot_origin;
+    float4 backdrop_bounds;
+    float4 backdrop_content_mask;
+    float4 backdrop_corner_radii;
+    float backdrop_sigma;
+    float backdrop_opacity;
+    uint backdrop_pass_kind;
+    float backdrop_alpha_limit;
+    float backdrop_downsample_factor;
+    float backdrop_padding0;
+    float backdrop_padding1;
+    float backdrop_padding2;
+    float4 backdrop_tone;
+};
+
+static const uint BACKDROP_PASS_HORIZONTAL = 0;
+static const uint BACKDROP_PASS_COMPOSITE = 2;
+
+Texture2D<float4> t_backdrop_source: register(t2);
+Texture2D<float4> t_backdrop_snapshot: register(t3);
+SamplerState s_backdrop: register(s1);
+
+float4 backdrop_vertex(uint vertex_id: SV_VertexID): SV_Position {
+    float2 vertices[3] = {float2(-1.0, -1.0), float2(3.0, -1.0), float2(-1.0, 3.0)};
+    return float4(vertices[vertex_id], 0.0, 1.0);
+}
+
+// Samples at a position in the texture's pixels, clamped to the pixel centers of the
+// region that holds this filter's snapshot. Scratch textures can be larger than it.
+float4 sample_backdrop_source(float2 position) {
+    float2 clamped = clamp(position, 0.5, max(backdrop_source_active_size - 0.5, 0.5));
+    return t_backdrop_source.SampleLevel(s_backdrop, clamped / backdrop_source_size, 0.0);
+}
+
+float4 sample_backdrop_snapshot(float2 position) {
+    float2 clamped = clamp(position, 0.5, max(backdrop_snapshot_active_size - 0.5, 0.5));
+    return t_backdrop_snapshot.SampleLevel(s_backdrop, clamped / backdrop_snapshot_size, 0.0);
+}
+
+float4 backdrop_fragment(float4 position: SV_Position): SV_Target {
+    if (backdrop_pass_kind != BACKDROP_PASS_COMPOSITE) {
+        bool horizontal = backdrop_pass_kind == BACKDROP_PASS_HORIZONTAL;
+        float2 direction = horizontal ? float2(1.0, 0.0) : float2(0.0, 1.0);
+        float source_scale = horizontal ? backdrop_downsample_factor : 1.0;
+        float sigma = max(backdrop_sigma, 0.25);
+        int extent = int(ceil(3.0 * sigma));
+        float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+        float total = 0.0;
+        for (int i = -extent; i <= extent; i++) {
+            float weight = exp(-0.5 * float(i * i) / (sigma * sigma));
+            float2 center = (position.xy + direction * float(i)) * source_scale;
+            float4 tap;
+            if (horizontal && backdrop_downsample_factor == 4.0) {
+                // Four bilinear taps average a 4x4 box before downsampling.
+                tap = (sample_backdrop_source(center + float2(1.0, 1.0))
+                    + sample_backdrop_source(center - float2(1.0, 1.0))
+                    + sample_backdrop_source(center + float2(1.0, -1.0))
+                    + sample_backdrop_source(center + float2(-1.0, 1.0))) * 0.25;
+            } else {
+                tap = sample_backdrop_source(center);
+            }
+            sum += tap * weight;
+            total += weight;
+        }
+        return sum / total;
+    }
+
+    float2 local = position.xy - backdrop_snapshot_origin;
+    float4 original = sample_backdrop_snapshot(local);
+    float4 filtered = sample_backdrop_source(local / backdrop_downsample_factor);
+
+    float2 half_size = backdrop_bounds.zw * 0.5;
+    float2 delta = position.xy - backdrop_bounds.xy - half_size;
+    float radius = delta.y < 0.0
+        ? (delta.x < 0.0 ? backdrop_corner_radii.x : backdrop_corner_radii.y)
+        : (delta.x < 0.0 ? backdrop_corner_radii.w : backdrop_corner_radii.z);
+    float2 q = abs(delta) - half_size + radius;
+    float edge_distance = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+    float2 mask_end = backdrop_content_mask.xy + backdrop_content_mask.zw;
+    float2 mask_distance = min(position.xy - backdrop_content_mask.xy, mask_end - position.xy);
+    float coverage = saturate(min(-edge_distance, min(mask_distance.x, mask_distance.y)) + 0.5)
+        * backdrop_opacity;
+
+    // Constrain premultiplied color to what a source-over `tone` fill could produce over
+    // this pixel, without adding coverage.
+    float3 tone = backdrop_tone.rgb;
+    float tone_alpha = backdrop_tone.a;
+    float3 lower = tone * tone_alpha * filtered.a;
+    float3 upper = (tone * tone_alpha + (1.0 - tone_alpha)) * filtered.a;
+    float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+    if (treated.a > backdrop_alpha_limit) {
+        treated *= backdrop_alpha_limit / treated.a;
+    }
+    return lerp(original, treated, coverage);
+}

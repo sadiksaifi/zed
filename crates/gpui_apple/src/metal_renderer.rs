@@ -1,5 +1,8 @@
+mod backdrop;
+
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
+use backdrop::BackdropRenderer;
 use block2::RcBlock;
 use cocoa::{
     base::{NO, YES},
@@ -135,6 +138,7 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    backdrop: BackdropRenderer,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -325,6 +329,7 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         );
 
+        let backdrop = BackdropRenderer::new(&device, &library);
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
         let core_video_texture_cache =
@@ -353,6 +358,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            backdrop,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         }
@@ -471,6 +477,12 @@ impl MetalRenderer {
                 return;
             }
         };
+        // Backdrop filters copy from the drawable, which a framebuffer-only layer forbids.
+        let framebuffer_only =
+            scene.backdrop_filters.is_empty() && !cfg!(any(test, feature = "test-support"));
+        if layer.framebuffer_only() != framebuffer_only {
+            layer.set_framebuffer_only(framebuffer_only);
+        }
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
             (viewport_size.width.ceil() as i32).into(),
@@ -681,6 +693,7 @@ impl MetalRenderer {
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
 
+        self.backdrop.prepare(&self.device, scene, viewport_size);
         let mut command_encoder = new_command_encoder_for_texture(
             command_buffer,
             texture,
@@ -690,6 +703,19 @@ impl MetalRenderer {
 
         for batch in scene.batches() {
             match batch {
+                PrimitiveBatch::BackdropFilters(range) => {
+                    command_encoder.end_encoding();
+                    for filter in &scene.backdrop_filters[range] {
+                        self.backdrop
+                            .encode(command_buffer, texture, filter, viewport_size);
+                    }
+                    command_encoder = new_command_encoder_for_texture(
+                        command_buffer,
+                        texture,
+                        viewport_size,
+                        None,
+                    );
+                }
                 PrimitiveBatch::Shadows(range) => {
                     self.draw_shadows(range, instance_bindings, viewport_size, command_encoder)
                 }
@@ -1744,6 +1770,57 @@ mod tests {
         assert_eq!(outside.get_pixel(17, 32).0[3], 0);
         assert_eq!(outside.get_pixel(10, 32).0[3], 255);
         assert_eq!(outside.get_pixel(14, 32).0[3], 255);
+    }
+
+    #[test]
+    fn backdrop_filter_blurs_earlier_primitives_and_not_later_ones() {
+        let mut renderer = translucent_renderer();
+        let rect = |x: f32, y: f32, width: f32, height: f32| {
+            Bounds::new(
+                point(ScaledPixels(x), ScaledPixels(y)),
+                gpui::size(ScaledPixels(width), ScaledPixels(height)),
+            )
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(rect(0., 0., 32., 64.), gpui::red()));
+        scene.insert_primitive(quad(rect(32., 0., 32., 64.), gpui::blue()));
+        scene.insert_primitive(gpui::BackdropFilter {
+            bounds: rect(16., 16., 32., 32.),
+            content_mask: ContentMask {
+                bounds: square(0., 64.),
+            },
+            radius: ScaledPixels(4.),
+            opacity: 1.,
+            ..Default::default()
+        });
+        scene.insert_primitive(quad(rect(40., 40., 4., 4.), gpui::green()));
+        scene.finish();
+
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(64), DevicePixels(64)))
+            .unwrap();
+
+        let blurred = image.get_pixel(31, 32).0;
+        assert!(
+            blurred[0] > 32 && blurred[2] > 32,
+            "the filter mixes red and blue across the edge, got {blurred:?}"
+        );
+        assert_eq!(
+            image.get_pixel(31, 8).0,
+            [255, 0, 0, 255],
+            "outside stays sharp"
+        );
+        assert_eq!(
+            image.get_pixel(32, 8).0,
+            [0, 0, 255, 255],
+            "outside stays sharp"
+        );
+        let later = image.get_pixel(42, 42).0;
+        assert_eq!(
+            (later[0], later[2], later[3]),
+            (0, 0, 255),
+            "a primitive painted after the filter is not blurred, got {later:?}"
+        );
     }
 
     #[test]

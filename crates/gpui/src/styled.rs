@@ -2,7 +2,7 @@ use crate::{
     self as gpui, AbsoluteLength, AlignContent, AlignItems, AlignSelf, BorderStyle, CursorStyle,
     DefiniteLength, Display, Fill, FlexDirection, FlexWrap, Font, FontFeatures, FontStyle,
     FontWeight, GridPlacement, GridTemplate, GridTemplateMinSize, Hsla, JustifyContent, Length,
-    SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
+    Pixels, Rgba, SharedString, StrikethroughStyle, StyleRefinement, TextAlign, TextOverflow,
     TextStyleRefinement, UnderlineStyle, WhiteSpace, px, relative, rems,
 };
 pub use gpui_macros::{
@@ -493,6 +493,29 @@ pub trait Styled: Sized {
         Self: Sized,
     {
         self.style().background = Some(fill.into());
+        self
+    }
+
+    /// Blurs the content painted behind the element before its fill and children paint.
+    /// `radius` is the Gaussian sigma in logical pixels, capped at 64 device pixels.
+    fn backdrop_blur(mut self, radius: Pixels) -> Self {
+        self.style().backdrop_blur = Some(radius);
+        self
+    }
+
+    /// Constrains the backdrop's color to what `tone` could produce as a source-over fill,
+    /// keeping the backdrop's alpha. A transparent tone changes nothing.
+    fn backdrop_tone(mut self, tone: Rgba) -> Self {
+        self.style().backdrop_tone = Some(tone);
+        self
+    }
+
+    /// Limits the backdrop's framebuffer alpha to reveal the native window backing. The value
+    /// is clamped to 0..=1, and 1 keeps alpha. Clear pixels stay clear, and applying the same
+    /// limit again changes nothing at full coverage. Use values below 1 only in transparent
+    /// windows.
+    fn backdrop_alpha_limit(mut self, alpha_limit: f32) -> Self {
+        self.style().backdrop_alpha_limit = Some(alpha_limit);
         self
     }
 

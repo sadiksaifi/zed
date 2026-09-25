@@ -19,8 +19,11 @@ use windows::{
     core::{HSTRING, Interface},
 };
 
+mod backdrop;
+
 use crate::directx_renderer::shader_resources::{RawShaderBytes, ShaderModule, ShaderTarget};
 use crate::*;
+use backdrop::BackdropRenderer;
 use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
@@ -43,6 +46,7 @@ pub(crate) struct DirectXRenderer {
     resources: Option<DirectXResources>,
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
+    backdrop: BackdropRenderer,
     direct_composition: Option<DirectComposition>,
     font_info: &'static FontInfo,
 
@@ -170,6 +174,8 @@ impl DirectXRenderer {
             .context("Creating DirectX global elements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectX render pipelines")?;
+        let backdrop =
+            BackdropRenderer::new(&devices.device).context("Creating DirectX backdrop renderer")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -189,6 +195,7 @@ impl DirectXRenderer {
             resources: Some(resources),
             globals,
             pipelines,
+            backdrop,
             direct_composition,
             font_info: Self::get_font_info(),
             width: 1,
@@ -300,6 +307,8 @@ impl DirectXRenderer {
             .context("Creating DirectXGlobalElements")?;
         let pipelines = DirectXRenderPipelines::new(&devices.device)
             .context("Creating DirectXRenderPipelines")?;
+        let backdrop =
+            BackdropRenderer::new(&devices.device).context("Creating DirectX backdrop renderer")?;
 
         let direct_composition = if disable_direct_composition {
             None
@@ -322,6 +331,7 @@ impl DirectXRenderer {
         self.resources = Some(resources);
         self.globals = globals;
         self.pipelines = pipelines;
+        self.backdrop = backdrop;
         self.direct_composition = direct_composition;
         self.skip_draws = true;
         Ok(())
@@ -356,6 +366,14 @@ impl DirectXRenderer {
             _ => [0.0f32; 4],
         })?;
         self.upload_scene_buffers(scene)?;
+        self.backdrop.prepare(
+            &self.devices.as_ref().context("devices missing")?.device,
+            scene,
+            size(
+                DevicePixels(self.width as i32),
+                DevicePixels(self.height as i32),
+            ),
+        )?;
 
         let annotation = self
             .devices
@@ -385,6 +403,9 @@ impl DirectXRenderer {
                     self.draw_polychrome_sprites(texture_id, range.start, range.len())
                 }
                 PrimitiveBatch::Surfaces(range) => self.draw_surfaces(&scene.surfaces[range]),
+                PrimitiveBatch::BackdropFilters(range) => {
+                    self.draw_backdrop_filters(&scene.backdrop_filters[range])
+                }
             }
             .with_context(|| {
                 format!(
@@ -811,6 +832,25 @@ impl DirectXRenderer {
             start as u32,
             len as u32,
         )
+    }
+
+    fn draw_backdrop_filters(&mut self, filters: &[BackdropFilter]) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        let resources = self.resources.as_ref().context("resources missing")?;
+        let target = resources
+            .render_target
+            .as_ref()
+            .context("render target missing")?;
+        for filter in filters {
+            self.backdrop.draw(
+                &devices.device_context,
+                target,
+                &resources.render_target_view,
+                &resources.viewport,
+                filter,
+            )?;
+        }
+        Ok(())
     }
 
     fn draw_surfaces(&mut self, surfaces: &[PaintSurface]) -> Result<()> {
@@ -1717,6 +1757,7 @@ pub(crate) mod shader_resources {
         SubpixelSprite,
         PolychromeSprite,
         EmojiRasterization,
+        Backdrop,
     }
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1793,6 +1834,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::EmojiRasterization => match target {
                     ShaderTarget::Vertex => EMOJI_RASTERIZATION_VERTEX_BYTES,
                     ShaderTarget::Fragment => EMOJI_RASTERIZATION_FRAGMENT_BYTES,
+                },
+                ShaderModule::Backdrop => match target {
+                    ShaderTarget::Vertex => BACKDROP_VERTEX_BYTES,
+                    ShaderTarget::Fragment => BACKDROP_FRAGMENT_BYTES,
                 },
             };
             Self { inner: bytes }
@@ -1881,6 +1926,7 @@ pub(crate) mod shader_resources {
                 ShaderModule::SubpixelSprite => "subpixel_sprite",
                 ShaderModule::PolychromeSprite => "polychrome_sprite",
                 ShaderModule::EmojiRasterization => "emoji_rasterization",
+                ShaderModule::Backdrop => "backdrop",
             }
         }
     }

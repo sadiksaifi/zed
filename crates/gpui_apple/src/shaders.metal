@@ -1281,3 +1281,123 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// Matches `gpui::BackdropUniforms`.
+struct BackdropUniforms {
+  float2 target_size;
+  float2 source_size;
+  float2 source_active_size;
+  float2 snapshot_size;
+  float2 snapshot_active_size;
+  float2 snapshot_origin;
+  float4 bounds;
+  float4 content_mask;
+  float4 corner_radii;
+  float sigma;
+  float opacity;
+  uint pass;
+  float alpha_limit;
+  float downsample_factor;
+  float padding0;
+  float padding1;
+  float padding2;
+  float4 tone;
+};
+
+constant uint BACKDROP_PASS_HORIZONTAL = 0;
+constant uint BACKDROP_PASS_COMPOSITE = 2;
+
+vertex float4 backdrop_vertex(uint vertex_id [[vertex_id]]) {
+  const float2 vertices[3] = {float2(-1., -1.), float2(3., -1.),
+                              float2(-1., 3.)};
+  return float4(vertices[vertex_id], 0., 1.);
+}
+
+// Samples `source` at a position in its pixels, clamped to the pixel centers of the
+// region that holds this filter's snapshot. Scratch textures can be larger than it.
+float4 sample_backdrop(texture2d<float> source, float2 position,
+                       float2 active_size, float2 texture_size) {
+  constexpr sampler linear_sampler(coord::normalized, address::clamp_to_edge,
+                                   filter::linear);
+  float2 clamped =
+      clamp(position, float2(0.5), max(active_size - 0.5, float2(0.5)));
+  return source.sample(linear_sampler, clamped / texture_size);
+}
+
+fragment float4 backdrop_fragment(float4 position [[position]],
+                                  constant BackdropUniforms &uniforms
+                                  [[buffer(0)]],
+                                  texture2d<float> source [[texture(0)]],
+                                  texture2d<float> snapshot [[texture(1)]]) {
+  if (uniforms.pass != BACKDROP_PASS_COMPOSITE) {
+    bool horizontal = uniforms.pass == BACKDROP_PASS_HORIZONTAL;
+    float2 direction = horizontal ? float2(1., 0.) : float2(0., 1.);
+    float source_scale = horizontal ? uniforms.downsample_factor : 1.;
+    float sigma = max(uniforms.sigma, 0.25);
+    int extent = int(ceil(3. * sigma));
+    float4 sum = float4(0.);
+    float total = 0.;
+    for (int i = -extent; i <= extent; ++i) {
+      float weight = exp(-0.5 * float(i * i) / (sigma * sigma));
+      float2 center = (position.xy + direction * float(i)) * source_scale;
+      float4 sample;
+      if (horizontal && uniforms.downsample_factor == 4.) {
+        // Four bilinear taps average a 4x4 box before downsampling.
+        sample = (sample_backdrop(source, center + float2(1., 1.),
+                                  uniforms.source_active_size,
+                                  uniforms.source_size) +
+                  sample_backdrop(source, center - float2(1., 1.),
+                                  uniforms.source_active_size,
+                                  uniforms.source_size) +
+                  sample_backdrop(source, center + float2(1., -1.),
+                                  uniforms.source_active_size,
+                                  uniforms.source_size) +
+                  sample_backdrop(source, center + float2(-1., 1.),
+                                  uniforms.source_active_size,
+                                  uniforms.source_size)) *
+                 0.25;
+      } else {
+        sample = sample_backdrop(source, center, uniforms.source_active_size,
+                                 uniforms.source_size);
+      }
+      sum += sample * weight;
+      total += weight;
+    }
+    return sum / total;
+  }
+
+  float2 local = position.xy - uniforms.snapshot_origin;
+  float4 original = sample_backdrop(snapshot, local, uniforms.snapshot_active_size,
+                                    uniforms.snapshot_size);
+  float4 filtered = sample_backdrop(
+      source, local / uniforms.downsample_factor,
+      uniforms.source_active_size, uniforms.source_size);
+
+  float2 half_size = uniforms.bounds.zw * 0.5;
+  float2 delta = position.xy - uniforms.bounds.xy - half_size;
+  float radius = delta.y < 0.
+                     ? (delta.x < 0. ? uniforms.corner_radii.x
+                                     : uniforms.corner_radii.y)
+                     : (delta.x < 0. ? uniforms.corner_radii.w
+                                     : uniforms.corner_radii.z);
+  float2 q = abs(delta) - half_size + radius;
+  float distance = length(max(q, 0.)) + min(max(q.x, q.y), 0.) - radius;
+  float2 mask_end = uniforms.content_mask.xy + uniforms.content_mask.zw;
+  float2 mask_distance = min(position.xy - uniforms.content_mask.xy,
+                             mask_end - position.xy);
+  float coverage =
+      saturate(min(-distance, min(mask_distance.x, mask_distance.y)) + 0.5) *
+      uniforms.opacity;
+
+  // Constrain premultiplied color to what a source-over `tone` fill could produce
+  // over this pixel, without adding coverage.
+  float3 tone = uniforms.tone.rgb;
+  float tone_alpha = uniforms.tone.a;
+  float3 lower = tone * tone_alpha * filtered.a;
+  float3 upper = (tone * tone_alpha + (1. - tone_alpha)) * filtered.a;
+  float4 treated = float4(clamp(filtered.rgb, lower, upper), filtered.a);
+  if (treated.a > uniforms.alpha_limit) {
+    treated *= uniforms.alpha_limit / treated.a;
+  }
+  return mix(original, treated, coverage);
+}

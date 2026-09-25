@@ -278,6 +278,17 @@ pub struct Style {
     /// The fill color of this element
     pub background: Option<Fill>,
 
+    /// The Gaussian sigma of the backdrop blur in logical pixels, capped at 64 device pixels.
+    pub backdrop_blur: Option<Pixels>,
+
+    /// Constrains the filtered backdrop to the color range this source-over tone admits,
+    /// without changing the backdrop's alpha.
+    pub backdrop_tone: Option<Rgba>,
+
+    /// The maximum framebuffer alpha beneath this element. Premultiplied color scales with
+    /// alpha, which reveals the window backing without changing straight color.
+    pub backdrop_alpha_limit: Option<f32>,
+
     /// The border color of this element
     pub border_color: Option<Hsla>,
 
@@ -700,16 +711,29 @@ impl Style {
             cx.set_global(DebugBelow)
         }
 
-        #[cfg(debug_assertions)]
-        if self.debug || cx.has_global::<DebugBelow>() {
-            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
-        }
-
         let rem_size = window.rem_size();
         let corner_radii = self
             .corner_radii
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
+
+        if self.backdrop_blur.is_some()
+            || self.backdrop_tone.is_some()
+            || self.backdrop_alpha_limit.is_some()
+        {
+            window.paint_backdrop_filter(
+                bounds,
+                corner_radii,
+                self.backdrop_blur.unwrap_or_default(),
+                self.backdrop_tone.unwrap_or_default(),
+                self.backdrop_alpha_limit.unwrap_or(1.0),
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        if self.debug || cx.has_global::<DebugBelow>() {
+            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
+        }
 
         if self.shadow_outside_only {
             window.paint_drop_shadows_outside(bounds, corner_radii, &self.box_shadow);
@@ -809,6 +833,9 @@ impl Default for Style {
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
             background: None,
+            backdrop_blur: None,
+            backdrop_tone: None,
+            backdrop_alpha_limit: None,
             border_color: None,
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
