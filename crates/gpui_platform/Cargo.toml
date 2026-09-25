@@ -22,6 +22,11 @@ screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_wind
 runtime_shaders = ["gpui_macos/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
+native-test-support = ["gpui_macos/native-test-support"]
+
+[[example]]
+name = "macos_frame_demand"
+required-features = ["native-test-support"]
 
 [[bench]]
 name = "inspector_render"

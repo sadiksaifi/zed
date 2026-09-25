@@ -8,6 +8,8 @@ mod dispatcher;
 mod display;
 mod display_link;
 mod events;
+#[cfg(feature = "native-test-support")]
+mod frame_test_support;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;
@@ -56,6 +58,9 @@ pub(crate) use window::*;
 pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
+
+#[cfg(feature = "native-test-support")]
+pub use frame_test_support::FrameTestSnapshot;
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;

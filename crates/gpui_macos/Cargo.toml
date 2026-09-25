@@ -12,6 +12,10 @@ workspace = true
 path = "src/gpui_macos.rs"
 doctest = false
 
+[[example]]
+name = "display_link_lifecycle"
+required-features = ["native-test-support"]
+
 [features]
 default = ["gpui/default"]
 bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
@@ -19,6 +23,9 @@ test-support = ["gpui/test-support", "gpui_apple/test-support"]
 runtime_shaders = ["gpui_apple/runtime_shaders"]
 font-kit = ["dep:font-kit"]
 screen-capture = ["gpui/screen-capture"]
+# Counters and native fixtures for frame scheduling. Does not enable
+# `test-support`, so fixtures exercise real AppKit frame scheduling.
+native-test-support = []
 
 [dependencies]
 gpui.workspace = true

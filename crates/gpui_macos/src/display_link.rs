@@ -50,6 +50,8 @@
 //! is a std implementation detail, not a guarantee; if it changes, the cost
 //! is added latency under contention, not incorrectness.)
 
+#[cfg(feature = "native-test-support")]
+use crate::frame_test_support::{Counter, record};
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
@@ -124,6 +126,8 @@ unsafe extern "C" fn display_link_output_callback(
     _flags_out: *mut i64,
     display_id: *mut c_void,
 ) -> i32 {
+    #[cfg(feature = "native-test-support")]
+    record(Counter::NativeVsync);
     let display_id = display_id as usize as CGDirectDisplayID;
     let registry = lock_registry();
     if let Some(entry) = registry.displays.get(&display_id) {
@@ -143,13 +147,16 @@ fn subscribe(
     let needs_link = !lock_registry().displays.contains_key(&display_id);
     let new_link = if needs_link {
         // Created outside the registry lock; see the lock ordering note above.
-        Some(unsafe {
+        let link = unsafe {
             sys::DisplayLink::new(
                 display_id,
                 display_link_output_callback,
                 display_id as usize as *mut c_void,
             )?
-        })
+        };
+        #[cfg(feature = "native-test-support")]
+        record(Counter::NativeLinkCreated);
+        Some(link)
     } else {
         None
     };
@@ -196,8 +203,12 @@ fn subscribe(
             }
             return Err(error);
         }
+        #[cfg(feature = "native-test-support")]
+        record(Counter::NativeLinkStarted);
     }
 
+    #[cfg(feature = "native-test-support")]
+    record(Counter::WindowSourceSubscribed);
     Ok(subscriber_id)
 }
 
@@ -210,6 +221,8 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
             return;
         };
         entry.subscribers.retain(|(id, _)| *id != subscriber_id);
+        #[cfg(feature = "native-test-support")]
+        record(Counter::WindowSourceUnsubscribed);
         if entry.subscribers.is_empty() && entry.running {
             entry.running = false;
             Some(entry.link.clone())
@@ -222,6 +235,8 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
         // A final output callback can still fire after this returns; it finds
         // no subscribers for this display and does nothing.
         unsafe { link.stop().log_err() };
+        #[cfg(feature = "native-test-support")]
+        record(Counter::NativeLinkStopped);
     }
 }
 
@@ -249,16 +264,31 @@ impl WindowFrameSource {
             frame_requests.resume();
             frame_requests
         };
+        #[cfg(feature = "native-test-support")]
+        record(Counter::WindowSourceCreated);
         Self {
             frame_requests,
             registration: None,
         }
     }
 
+    /// Subscribes to the vsync of `display_id`, leaving any previous display.
+    /// Starting again on the current display does nothing.
+    ///
+    /// A new subscription also signals one frame request immediately, so the
+    /// first pending frame does not wait for CoreVideo to restart its refresh
+    /// phase. Later requests stay paced by the display.
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
+        if self
+            .registration
+            .is_some_and(|(current_display_id, _)| current_display_id == display_id)
+        {
+            return Ok(());
+        }
         self.stop();
         let subscriber_id = subscribe(display_id, self.frame_requests.clone())?;
         self.registration = Some((display_id, subscriber_id));
+        self.frame_requests.merge_data(1);
         Ok(())
     }
 
@@ -278,6 +308,8 @@ impl Drop for WindowFrameSource {
         // its context points at the window's native view, which may be
         // deallocated after this.
         self.frame_requests.cancel();
+        #[cfg(feature = "native-test-support")]
+        record(Counter::WindowSourceReleased);
     }
 }
 

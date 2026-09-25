@@ -3,6 +3,9 @@
 
 pub use gpui::Platform;
 
+#[cfg(all(target_os = "macos", feature = "native-test-support"))]
+pub use gpui_macos::FrameTestSnapshot;
+
 use std::rc::Rc;
 
 /// Returns a background executor for the current platform.

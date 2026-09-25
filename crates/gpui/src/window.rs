@@ -1828,10 +1828,14 @@ impl Window {
 
                 // Platforms that stop requesting frames for idle windows only
                 // deliver another request after a wakeup. If demand remains
-                // after this frame (the window was re-invalidated mid-draw, or
-                // animations scheduled next-frame callbacks), re-arm the frame
-                // source explicitly.
-                if invalidator.is_dirty() || !next_frame_callbacks.borrow().is_empty() {
+                // after this frame (the window was re-invalidated mid-draw,
+                // animations scheduled next-frame callbacks, or high-rate input
+                // still sustains presentation), re-arm the frame source
+                // explicitly.
+                if invalidator.is_dirty()
+                    || !next_frame_callbacks.borrow().is_empty()
+                    || input_rate_tracker.borrow().is_high_rate()
+                {
                     invalidator.wake_platform();
                 }
             }
@@ -3396,6 +3400,10 @@ impl Window {
             self.refresh();
         }
         self.needs_present.set(true);
+        // A draw outside a frame request (window creation, input dispatch)
+        // leaves a scene to present. Platforms that stop requesting frames for
+        // idle windows need a wakeup to present it.
+        self.invalidator.wake_platform();
 
         #[cfg(feature = "profiler")]
         {
