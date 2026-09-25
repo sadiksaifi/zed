@@ -1307,7 +1307,7 @@ fn build_pipeline_state(
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1341,7 +1341,7 @@ fn build_path_sprite_pipeline_state(
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1636,5 +1636,61 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Hsla, Quad};
+
+    fn translucent_renderer() -> MetalRenderer {
+        let instance_buffer_pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
+        MetalRenderer::new_internal(
+            MetalRenderer::create_device(),
+            None,
+            false,
+            instance_buffer_pool,
+        )
+    }
+
+    fn square(origin: f32, size: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            point(ScaledPixels(origin), ScaledPixels(origin)),
+            gpui::size(ScaledPixels(size), ScaledPixels(size)),
+        )
+    }
+
+    fn quad(bounds: Bounds<ScaledPixels>, color: Hsla) -> Quad {
+        Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            background: color.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn translucent_quads_accumulate_source_over_alpha() {
+        let mut renderer = translucent_renderer();
+        let mut scene = Scene::default();
+        let half_white = Hsla {
+            h: 0.,
+            s: 0.,
+            l: 1.,
+            a: 0.5,
+        };
+        scene.insert_primitive(quad(square(0., 8.), half_white));
+        scene.insert_primitive(quad(square(0., 8.), half_white));
+        scene.finish();
+
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(8), DevicePixels(8)))
+            .unwrap();
+
+        // Two 50% layers cover 75% of a transparent target. Additive destination
+        // alpha would saturate coverage to 100%.
+        let alpha = image.get_pixel(4, 4).0[3];
+        assert!((190..=192).contains(&alpha), "alpha was {alpha}");
     }
 }
