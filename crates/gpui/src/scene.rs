@@ -582,7 +582,8 @@ pub struct Shadow {
     pub element_corner_radii: Corners<ScaledPixels>,
     /// 0 = drop shadow (rendered outside the element), 1 = inset shadow (rendered inside).
     pub inset: u32,
-    pub pad: u32, // align to 8 bytes
+    /// 1 = clip a drop shadow out of the element's rounded bounds. Also aligns to 8 bytes.
+    pub outside_only: u32,
 }
 
 impl From<Shadow> for Primitive {

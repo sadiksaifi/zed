@@ -4387,6 +4387,29 @@ impl Window {
         corner_radii: Corners<Pixels>,
         shadows: &[BoxShadow],
     ) {
+        self.paint_drop_shadows_impl(bounds, corner_radii, shadows, false);
+    }
+
+    /// Paint the drop shadows from `shadows` like [`Self::paint_drop_shadows`], clipped out
+    /// of the element's rounded bounds so a translucent element does not show its own shadow.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_drop_shadows_outside(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+    ) {
+        self.paint_drop_shadows_impl(bounds, corner_radii, shadows, true);
+    }
+
+    fn paint_drop_shadows_impl(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        shadows: &[BoxShadow],
+        outside_only: bool,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -4409,7 +4432,7 @@ impl Window {
                 element_bounds,
                 element_corner_radii,
                 inset: 0,
-                pad: 0,
+                outside_only: outside_only.into(),
             });
         }
     }
@@ -4454,7 +4477,7 @@ impl Window {
                 element_bounds,
                 element_corner_radii,
                 inset: 1,
-                pad: 0,
+                outside_only: 0,
             });
         }
     }

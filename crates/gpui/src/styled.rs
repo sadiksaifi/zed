@@ -496,6 +496,12 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Clips drop shadows out of the element's rounded bounds while keeping their exterior.
+    fn shadow_outside_only(mut self) -> Self {
+        self.style().shadow_outside_only = Some(true);
+        self
+    }
+
     /// Sets the border style of the element.
     fn border_dashed(mut self) -> Self {
         self.style().border_style = Some(BorderStyle::Dashed);

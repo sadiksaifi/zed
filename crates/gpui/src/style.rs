@@ -291,6 +291,9 @@ pub struct Style {
     /// Box shadow of the element
     pub box_shadow: Vec<BoxShadow>,
 
+    /// Whether drop shadows are clipped out of the element's rounded bounds.
+    pub shadow_outside_only: bool,
+
     /// The text style of this element
     #[refineable]
     pub text: TextStyleRefinement,
@@ -708,7 +711,11 @@ impl Style {
             .to_pixels(rem_size)
             .clamp_radii_for_quad_size(bounds.size);
 
-        window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
+        if self.shadow_outside_only {
+            window.paint_drop_shadows_outside(bounds, corner_radii, &self.box_shadow);
+        } else {
+            window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
+        }
 
         let background_color = self.background.as_ref().and_then(Fill::color);
         if background_color.is_some_and(|color| !color.is_transparent()) {
@@ -806,6 +813,7 @@ impl Default for Style {
             border_style: BorderStyle::default(),
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
+            shadow_outside_only: false,
             text: TextStyleRefinement::default(),
             mouse_cursor: None,
             opacity: None,

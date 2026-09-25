@@ -1658,7 +1658,7 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Hsla, Quad};
+    use gpui::{Corners, Hsla, Quad};
 
     fn translucent_renderer() -> MetalRenderer {
         let instance_buffer_pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
@@ -1708,6 +1708,42 @@ mod tests {
         // alpha would saturate coverage to 100%.
         let alpha = image.get_pixel(4, 4).0[3];
         assert!((190..=192).contains(&alpha), "alpha was {alpha}");
+    }
+
+    #[test]
+    fn outside_only_drop_shadow_clears_the_element_interior() {
+        let mut renderer = translucent_renderer();
+        let render = |renderer: &mut MetalRenderer, outside_only| {
+            let mut scene = Scene::default();
+            scene.insert_primitive(gpui::Shadow {
+                order: 0,
+                blur_radius: ScaledPixels(0.),
+                bounds: square(8., 48.),
+                corner_radii: Corners::default(),
+                content_mask: ContentMask {
+                    bounds: square(0., 64.),
+                },
+                color: gpui::black(),
+                element_bounds: square(16., 32.),
+                element_corner_radii: Corners::default(),
+                inset: 0,
+                outside_only,
+            });
+            scene.finish();
+            renderer
+                .render_scene_to_image(&scene, size(DevicePixels(64), DevicePixels(64)))
+                .unwrap()
+        };
+
+        let full = render(&mut renderer, 0);
+        assert_eq!(full.get_pixel(32, 32).0[3], 255);
+        assert_eq!(full.get_pixel(10, 32).0[3], 255);
+
+        let outside = render(&mut renderer, 1);
+        assert_eq!(outside.get_pixel(32, 32).0[3], 0);
+        assert_eq!(outside.get_pixel(17, 32).0[3], 0);
+        assert_eq!(outside.get_pixel(10, 32).0[3], 255);
+        assert_eq!(outside.get_pixel(14, 32).0[3], 255);
     }
 
     #[test]
