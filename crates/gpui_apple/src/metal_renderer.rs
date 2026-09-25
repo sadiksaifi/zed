@@ -393,7 +393,16 @@ impl MetalRenderer {
                 ];
             }
         }
-        self.update_path_intermediate_textures(size);
+        // Path targets are allocated when a scene first draws a path, so path-free
+        // scenes never pay for them. A resize only drops targets of the old size.
+        if self
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| !texture_has_size(texture, size))
+        {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        }
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -403,6 +412,13 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            return;
+        }
+        if self
+            .path_intermediate_texture
+            .as_ref()
+            .is_some_and(|texture| texture_has_size(texture, size))
+        {
             return;
         }
 
@@ -581,9 +597,6 @@ impl MetalRenderer {
         // Headless callers do not have a Cocoa event-loop pool to release
         // autoreleased command buffers and render-pass descriptors.
         objc2::rc::autoreleasepool(|_| {
-            // Update path intermediate textures for this size
-            self.update_path_intermediate_textures(size);
-
             // Create an offscreen texture as render target
             let texture_descriptor = metal::TextureDescriptor::new();
             texture_descriptor.set_width(size.width.0 as u64);
@@ -628,8 +641,6 @@ impl MetalRenderer {
         }
 
         objc2::rc::autoreleasepool(|_| {
-            self.update_path_intermediate_textures(size);
-
             let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
                 texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
             });
@@ -751,7 +762,7 @@ impl MetalRenderer {
     }
 
     fn draw_paths_to_intermediate(
-        &self,
+        &mut self,
         paths: &[Path<ScaledPixels>],
         writer: &mut InstanceBufferWriter,
         viewport_size: Size<DevicePixels>,
@@ -760,6 +771,7 @@ impl MetalRenderer {
         if paths.is_empty() {
             return Ok(false);
         }
+        self.update_path_intermediate_textures(viewport_size);
         let intermediate_texture = self
             .path_intermediate_texture
             .as_ref()
@@ -1250,6 +1262,10 @@ fn new_command_encoder_for_texture<'a>(
     command_encoder
 }
 
+fn texture_has_size(texture: &metal::TextureRef, size: Size<DevicePixels>) -> bool {
+    texture.width() == size.width.0 as u64 && texture.height() == size.height.0 as u64
+}
+
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 fn read_texture_to_image(texture: &metal::TextureRef) -> Result<RgbaImage> {
     let width = texture.width() as u32;
@@ -1692,5 +1708,70 @@ mod tests {
         // alpha would saturate coverage to 100%.
         let alpha = image.get_pixel(4, 4).0[3];
         assert!((190..=192).contains(&alpha), "alpha was {alpha}");
+    }
+
+    #[test]
+    fn drawable_resizes_without_paths_do_not_allocate_path_targets() {
+        let mut renderer = translucent_renderer();
+        for dimension in [64, 128, 128, 0, 64] {
+            renderer.update_drawable_size(size(DevicePixels(dimension), DevicePixels(dimension)));
+            assert!(renderer.path_intermediate_texture.is_none());
+            assert!(renderer.path_intermediate_msaa_texture.is_none());
+        }
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(square(0., 8.), gpui::red()));
+        scene.finish();
+        renderer
+            .render_scene_to_image(&scene, size(DevicePixels(64), DevicePixels(64)))
+            .unwrap();
+        assert!(renderer.path_intermediate_texture.is_none());
+    }
+
+    #[test]
+    fn first_path_after_resize_reuses_equal_targets_and_preserves_coverage() {
+        let mut renderer = translucent_renderer();
+        let mut builder = gpui::PathBuilder::fill();
+        builder.move_to(point(gpui::px(8.25), gpui::px(8.25)));
+        builder.line_to(point(gpui::px(39.75), gpui::px(8.25)));
+        builder.line_to(point(gpui::px(39.75), gpui::px(39.75)));
+        builder.line_to(point(gpui::px(8.25), gpui::px(39.75)));
+        builder.close();
+        let mut path = builder.build().unwrap().scale(1.);
+        path.color = gpui::rgba(0xff000080).into();
+        path.content_mask.bounds = square(0., 256.);
+        let mut scene = Scene::default();
+        scene.insert_primitive(path);
+        scene.finish();
+
+        let mut previous_target = None;
+        for dimension in [64, 64, 128, 128, 64] {
+            let viewport = size(DevicePixels(dimension), DevicePixels(dimension));
+            renderer.update_drawable_size(viewport);
+            let image = renderer.render_scene_to_image(&scene, viewport).unwrap();
+
+            let target = renderer.path_intermediate_texture.as_ref().unwrap();
+            assert!(texture_has_size(target, viewport));
+            if let Some((previous_dimension, previous_pointer)) = previous_target
+                && previous_dimension == dimension
+            {
+                assert_eq!(target.as_ptr(), previous_pointer);
+            }
+            previous_target = Some((dimension, target.as_ptr()));
+            assert_eq!(
+                renderer
+                    .path_intermediate_msaa_texture
+                    .as_ref()
+                    .unwrap()
+                    .sample_count(),
+                u64::from(PATH_SAMPLE_COUNT)
+            );
+
+            assert_eq!(image.get_pixel(24, 24).0, [128, 0, 0, 128]);
+            assert_eq!(image.get_pixel(0, 0).0, [0, 0, 0, 0]);
+            let edge = image.get_pixel(8, 24).0;
+            assert!(edge[3] > 0 && edge[3] < 128, "edge was {edge:?}");
+            assert_eq!(edge[0], edge[3]);
+        }
     }
 }
