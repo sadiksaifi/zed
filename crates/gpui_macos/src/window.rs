@@ -294,6 +294,18 @@ unsafe fn build_classes() {
                 sel!(characterIndexForPoint:),
                 character_index_for_point as extern "C" fn(&Object, Sel, NSPoint) -> u64,
             );
+            decl.add_method(
+                sel!(accessibilityChildren),
+                accessibility_children as extern "C" fn(&Object, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(accessibilityFocusedUIElement),
+                accessibility_focused_ui_element as extern "C" fn(&Object, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(accessibilityHitTest:),
+                accessibility_hit_test as extern "C" fn(&Object, Sel, NSPoint) -> id,
+            );
             decl.register()
         };
         BLURRED_VIEW_CLASS = {
@@ -707,7 +719,7 @@ struct MacWindowState {
     toggle_tab_bar_callback: Option<Box<dyn FnMut()>>,
     activated_least_once: bool,
     closed: Arc<AtomicBool>,
-    accesskit_adapter: Option<accesskit_macos::SubclassingAdapter>,
+    accesskit: Option<AccessKitHost>,
     // The parent window if this window is a sheet (Dialog kind)
     sheet_parent: Option<id>,
 }
@@ -1143,7 +1155,7 @@ impl MacWindow {
                 toggle_tab_bar_callback: None,
                 activated_least_once: false,
                 closed: Arc::new(AtomicBool::new(false)),
-                accesskit_adapter: None,
+                accesskit: None,
                 sheet_parent: None,
             }));
             let mut window = Self(state, marker);
@@ -1375,15 +1387,7 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
-        // `accesskit_macos::SubclassingAdapter::for_window` strong-retains the
-        // window's content view, and that content view keeps the `GPUIView` it
-        // hosts alive. Together with the `Arc<Mutex<MacWindowState>>` parked in
-        // both views' `windowState` ivar, that forms
-        // `MacWindowState -> adapter -> content view -> GPUIView -> MacWindowState`,
-        // a cycle the delegate/`frame_source` teardown below cannot break. Drop
-        // the adapter here so the native view, its `CAMetalLayer` and the
-        // renderer's command queue are actually released with the window.
-        drop(this.accesskit_adapter.take());
+        this.accesskit.take();
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -2361,23 +2365,29 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
+        let is_view_focused: BOOL = unsafe { msg_send![lock.native_window, isKeyWindow] };
+        // SAFETY: `native_view` is the live `GPUIView`, and window operations run
+        // on the main thread. The adapter holds the view weakly.
         let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
-                activation_handler,
+            accesskit_macos::Adapter::new(
+                lock.native_view.as_ptr() as *mut c_void,
+                is_view_focused == YES,
                 action_handler,
             )
         };
 
-        lock.accesskit_adapter = Some(adapter);
+        lock.accesskit = Some(AccessKitHost {
+            adapter,
+            activation_handler,
+        });
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
         let events = {
             let mut lock = self.0.lock();
-            lock.accesskit_adapter
+            lock.accesskit
                 .as_mut()
-                .and_then(|adapter| adapter.update_if_active(|| tree_update))
+                .and_then(|host| host.adapter.update_if_active(|| tree_update))
         };
         if let Some(events) = events {
             events.raise();
@@ -2387,6 +2397,19 @@ impl PlatformWindow for MacWindow {
     fn a11y_update_window_bounds(&self) {
         // macOS handles window bounds tracking automatically via NSAccessibility.
     }
+}
+
+/// The accesskit adapter behind `GPUIView`'s accessibility methods.
+///
+/// `GPUIView` implements the accessibility entry points itself instead of
+/// using `accesskit_macos::SubclassingAdapter`. That adapter swaps the view's
+/// class with `object_setClass`, which discards AppKit's key-value observing
+/// class. AppKit's touch bar observes `nextResponder` on views in the key
+/// window, and removing that observer from the swapped class raises
+/// `NSRangeException` when a window closes.
+struct AccessKitHost {
+    adapter: accesskit_macos::Adapter,
+    activation_handler: A11yActivationHandler,
 }
 
 struct A11yActivationHandler {
@@ -2483,6 +2506,52 @@ extern "C" fn dealloc_view(this: &Object, _: Sel) {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
     }
+}
+
+extern "C" fn accessibility_children(this: &Object, _: Sel) -> id {
+    with_accesskit_host(this, |host| {
+        host.adapter
+            .view_children(&mut host.activation_handler)
+            .cast()
+    })
+    .unwrap_or_else(|| unsafe { msg_send![super(this, class!(NSView)), accessibilityChildren] })
+}
+
+extern "C" fn accessibility_focused_ui_element(this: &Object, _: Sel) -> id {
+    with_accesskit_host(this, |host| {
+        host.adapter.focus(&mut host.activation_handler).cast()
+    })
+    .unwrap_or_else(|| unsafe {
+        msg_send![super(this, class!(NSView)), accessibilityFocusedUIElement]
+    })
+}
+
+extern "C" fn accessibility_hit_test(this: &Object, _: Sel, point: NSPoint) -> id {
+    with_accesskit_host(this, |host| {
+        host.adapter
+            .hit_test(
+                accesskit_macos::NSPoint::new(point.x, point.y),
+                &mut host.activation_handler,
+            )
+            .cast()
+    })
+    .unwrap_or_else(|| unsafe {
+        msg_send![super(this, class!(NSView)), accessibilityHitTest: point]
+    })
+}
+
+/// Runs `f` with the window's accesskit host outside the window-state lock,
+/// because the activation handler calls back into GPUI. Returns `None` when
+/// accessibility is not initialized or the host is already in use.
+fn with_accesskit_host<R>(this: &Object, f: impl FnOnce(&mut AccessKitHost) -> R) -> Option<R> {
+    let window_state = unsafe { get_window_state(this) };
+    let mut host = window_state.lock().accesskit.take()?;
+    let result = f(&mut host);
+    let mut lock = window_state.lock();
+    if !lock.closed.load(Ordering::Acquire) {
+        lock.accesskit.get_or_insert(host);
+    }
+    Some(result)
 }
 
 fn add_mouse_tracking_area(native_view: &Objc2NSView) {
@@ -3146,9 +3215,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
 
     let a11y_events = {
         let mut lock = window_state.lock();
-        lock.accesskit_adapter
+        lock.accesskit
             .as_mut()
-            .and_then(|adapter| adapter.update_view_focus_state(is_active))
+            .and_then(|host| host.adapter.update_view_focus_state(is_active))
     };
     if let Some(events) = a11y_events {
         events.raise();

@@ -7707,6 +7707,7 @@ name = "gpui_platform"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cocoa 0.26.0",
  "console_error_panic_hook",
  "criterion",
  "gpui",
@@ -7715,6 +7716,8 @@ dependencies = [
  "gpui_web",
  "gpui_wgpu",
  "gpui_windows",
+ "objc",
+ "raw-window-handle",
 ]
 
 [[package]]
