@@ -610,7 +610,8 @@ impl MacTextSystemState {
                 ix_converter.advance_to_utf16_ix(glyph_utf16_ix);
                 glyphs.push(ShapedGlyph {
                     id: GlyphId(glyph_id as u32),
-                    position: point(position.x as f32, position.y as f32).map(px),
+                    // CoreText's y axis points up; GPUI's glyph positions point down.
+                    position: point(position.x as f32, -(position.y as f32)).map(px),
                     index: ix_converter.utf8_ix,
                     is_emoji: self.is_emoji(font_id),
                 });
@@ -779,6 +780,31 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn combining_mark_position_is_above_the_baseline() {
+        let fonts = MacTextSystem::new();
+        let font_id = fonts.font_id(&font("Menlo")).unwrap();
+        let text = "A\u{030d}";
+        let layout = fonts.layout_line(
+            text,
+            px(18.0),
+            &[FontRun {
+                font_id,
+                len: text.len(),
+            }],
+        );
+        let glyphs = layout
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .collect::<Vec<_>>();
+
+        assert_eq!(glyphs.len(), 2);
+        assert_eq!(glyphs[0].position.y, px(0.0));
+        assert_eq!(glyphs[1].index, 1);
+        assert!(glyphs[1].position.y < px(0.0));
     }
 
     #[test]
