@@ -11,6 +11,7 @@ SpaceTerm uses this Zed fork as a Cargo git dependency pinned to a `spaceterm-YY
 - `feat(gpui): clip drop shadows out of an element with shadow_outside_only`
 - `feat(gpui): add backdrop filters`
 - `feat(gpui): paint glyphs and quads around a region`
+- `fix(gpui): keep empty content masks empty when snapping`
 - `test(gpui): record traffic light positions and export the macOS text system with test-support`
 
 ## Monthly rebase

@@ -3182,8 +3182,13 @@ impl Window {
 
     #[inline]
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
+        let bounds = self.content_mask().bounds;
         ContentMask {
-            bounds: self.cover_bounds(self.content_mask().bounds),
+            bounds: if bounds.is_empty() {
+                Bounds::new(bounds.origin.scale(self.scale_factor()), Default::default())
+            } else {
+                self.cover_bounds(bounds)
+            },
         }
     }
 
@@ -9424,6 +9429,50 @@ mod tests {
         window.next_frame.scene.clear();
         paint(window);
         &window.next_frame.scene.underlines
+    }
+
+    #[gpui::test]
+    fn empty_content_masks_remain_empty_at_fractional_origin(cx: &mut TestAppContext) {
+        test_underline_paint_at_scales(cx, |window| {
+            let mask = ContentMask {
+                bounds: Bounds::new(point(px(8.125), px(14.125)), size(px(0.), px(0.))),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                assert!(window.snapped_content_mask().bounds.is_empty());
+                window.paint_quad(crate::fill(
+                    Bounds::new(point(px(8.), px(14.)), size(px(1.), px(1.))),
+                    hsla(0., 0., 0., 1.),
+                ));
+                assert!(window.painted_quads().is_empty());
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn intersected_empty_content_mask_remains_empty_at_scale_two(cx: &mut TestAppContext) {
+        test_underline_paint_at_scales(cx, |window| {
+            if window.scale_factor() != 2. {
+                return;
+            }
+            let mask = ContentMask {
+                bounds: Bounds::new(point(px(8.125), px(14.125)), size(px(0.), px(0.))),
+            };
+            window.with_content_mask(Some(mask), |window| {
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: Bounds::new(point(px(8.), px(14.)), size(px(1.), px(1.))),
+                    }),
+                    |window| {
+                        assert!(window.snapped_content_mask().bounds.is_empty());
+                        window.paint_quad(crate::fill(
+                            Bounds::new(point(px(8.), px(14.)), size(px(1.), px(1.))),
+                            hsla(0., 0., 0., 1.),
+                        ));
+                        assert!(window.painted_quads().is_empty());
+                    },
+                );
+            });
+        });
     }
 
     fn assert_same_underline_geometry(actual: &Underline, expected: &Underline) {
