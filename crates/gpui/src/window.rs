@@ -2726,6 +2726,25 @@ impl Window {
         self.rendered_frame.scene.underlines.clone()
     }
 
+    /// Returns the monochrome glyph sprites in the most recently rendered frame's scene.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_monochrome_sprites(&self) -> Vec<MonochromeSprite> {
+        self.rendered_frame.scene.monochrome_sprites.clone()
+    }
+
+    /// Returns the subpixel glyph sprites in the most recently rendered frame's scene.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_subpixel_sprites(&self) -> Vec<SubpixelSprite> {
+        self.rendered_frame.scene.subpixel_sprites.clone()
+    }
+
+    /// Returns the polychrome sprites, such as emoji and images, in the most recently rendered
+    /// frame's scene.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_polychrome_sprites(&self) -> Vec<PolychromeSprite> {
+        self.rendered_frame.scene.polychrome_sprites.clone()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -4585,8 +4604,20 @@ impl Window {
     /// where the circular arcs meet. This will not display well when combined with dashed borders.
     /// Use `Corners::clamp_radii_for_quad_size` if the radii should fit within the bounds.
     pub fn paint_quad(&mut self, quad: PaintQuad) {
+        self.paint_quad_impl(quad, None);
+    }
+
+    /// Paints a quad like [`Self::paint_quad`], leaving the part inside `region` unpainted.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_quad_excluding_region(&mut self, quad: PaintQuad, region: Bounds<Pixels>) {
+        self.paint_quad_impl(quad, Some(region));
+    }
+
+    fn paint_quad_impl(&mut self, quad: PaintQuad, excluded_region: Option<Bounds<Pixels>>) {
         self.invalidator.debug_assert_paint();
 
+        let excluded_region = excluded_region.map(|region| self.snap_bounds(region));
         let opacity = self.element_opacity();
         let snapped_bounds = self.snap_bounds(quad.bounds);
         let snapped_border_widths = self.snap_border_widths(quad.border_widths);
@@ -4602,7 +4633,7 @@ impl Window {
         };
 
         if !quad.background.is_transparent() {
-            self.next_frame.scene.insert_primitive(quad);
+            self.insert_quad_excluding_region(quad, excluded_region);
             return;
         }
 
@@ -4612,7 +4643,7 @@ impl Window {
         let inner_bounds = Self::largest_border_interior(&quad);
 
         if inner_bounds.is_empty() {
-            self.next_frame.scene.insert_primitive(quad);
+            self.insert_quad_excluding_region(quad, excluded_region);
             return;
         }
 
@@ -4642,13 +4673,35 @@ impl Window {
         for strip in strips {
             let content_mask_bounds = quad.content_mask.bounds.intersect(&strip);
             if !content_mask_bounds.is_empty() {
-                self.next_frame.scene.insert_primitive(Quad {
-                    content_mask: ContentMask {
-                        bounds: content_mask_bounds,
+                self.insert_quad_excluding_region(
+                    Quad {
+                        content_mask: ContentMask {
+                            bounds: content_mask_bounds,
+                        },
+                        ..quad
                     },
-                    ..quad
-                });
+                    excluded_region,
+                );
             }
+        }
+    }
+
+    fn insert_quad_excluding_region(
+        &mut self,
+        quad: Quad,
+        excluded_region: Option<Bounds<ScaledPixels>>,
+    ) {
+        let Some(split) = excluded_region
+            .and_then(|region| SplitContentMask::new(&quad.content_mask, &quad.bounds, region))
+        else {
+            self.next_frame.scene.insert_primitive(quad);
+            return;
+        };
+        for content_mask in split.outside {
+            self.next_frame.scene.insert_primitive(Quad {
+                content_mask,
+                ..quad
+            });
         }
     }
 
@@ -4729,6 +4782,34 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, None)
+    }
+
+    /// Paints a monochrome glyph like [`Self::paint_glyph`], excluding or recoloring the part
+    /// inside a region. A recolor with different raster parameters uses a separate glyph tile.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_glyph_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_glyph_impl(origin, font_id, glyph_id, font_size, color, Some(region))
+    }
+
+    fn paint_glyph_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        region: Option<GlyphPaintRegion>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
@@ -4773,27 +4854,98 @@ impl Window {
                 size: tile.bounds.size.map(Into::into),
             };
             let content_mask = self.snapped_content_mask();
-
-            if subpixel_rendering {
-                self.next_frame.scene.insert_primitive(SubpixelSprite {
-                    order: 0,
-                    pad: 0,
-                    bounds,
-                    content_mask,
-                    color: color.opacity(element_opacity),
-                    tile,
-                    transformation: TransformationMatrix::unit(),
-                });
+            let region_bounds = region.map(|region| self.snap_bounds(region.bounds()));
+            let recolored = if let Some(GlyphPaintRegion::Recolor {
+                color: replacement, ..
+            }) = region
+                && region_bounds.is_some_and(|region_bounds| region_bounds.intersects(&bounds))
+            {
+                let replacement_dilation = self.text_system().glyph_dilation_for_color(replacement);
+                if replacement_dilation != dilation {
+                    let replacement_params = RenderGlyphParams {
+                        dilation: replacement_dilation,
+                        ..params
+                    };
+                    let replacement_raster_bounds =
+                        self.text_system().raster_bounds(&replacement_params)?;
+                    if replacement_raster_bounds.is_zero() {
+                        None
+                    } else {
+                        let replacement_tile = self
+                            .sprite_atlas
+                            .get_or_insert_with(replacement_params.clone().into(), &mut || {
+                                let (size, bytes) =
+                                    self.text_system().rasterize_glyph(&replacement_params)?;
+                                Ok(Some((size, Cow::Owned(bytes))))
+                            })?
+                            .expect("Callback above only errors or returns Some");
+                        Some((
+                            Bounds {
+                                origin: integer_origin
+                                    + replacement_raster_bounds.origin.map(Into::into),
+                                size: replacement_tile.bounds.size.map(Into::into),
+                            },
+                            replacement_tile,
+                        ))
+                    }
+                } else {
+                    Some((bounds, tile))
+                }
             } else {
-                self.next_frame.scene.insert_primitive(MonochromeSprite {
-                    order: 0,
-                    pad: 0,
-                    bounds,
-                    content_mask,
-                    color: color.opacity(element_opacity),
-                    tile,
-                    transformation: TransformationMatrix::unit(),
-                });
+                None
+            };
+            let split = region_bounds.and_then(|region_bounds| {
+                SplitContentMask::new(&content_mask, &bounds, region_bounds)
+            });
+
+            let scene = &mut self.next_frame.scene;
+            let mut insert = |bounds, tile, content_mask, color: Hsla| {
+                let color = color.opacity(element_opacity);
+                if subpixel_rendering {
+                    scene.insert_primitive(SubpixelSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask,
+                        color,
+                        tile,
+                        transformation: TransformationMatrix::unit(),
+                    });
+                } else {
+                    scene.insert_primitive(MonochromeSprite {
+                        order: 0,
+                        pad: 0,
+                        bounds,
+                        content_mask,
+                        color,
+                        tile,
+                        transformation: TransformationMatrix::unit(),
+                    });
+                }
+            };
+            match split {
+                None => insert(bounds, tile, content_mask, color),
+                Some(split) => {
+                    for content_mask in split.outside {
+                        insert(bounds, tile, content_mask, color);
+                    }
+                }
+            }
+            if let (
+                Some(GlyphPaintRegion::Recolor { color, .. }),
+                Some(region_bounds),
+                Some((recolor_bounds, recolor_tile)),
+            ) = (region, region_bounds, recolored)
+            {
+                let inside = region_bounds.intersect(&content_mask.bounds);
+                if recolor_bounds.intersects(&inside) {
+                    insert(
+                        recolor_bounds,
+                        recolor_tile,
+                        ContentMask { bounds: inside },
+                        color,
+                    );
+                }
             }
         }
         Ok(())
@@ -4833,6 +4985,33 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
     ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, None)
+    }
+
+    /// Paints an emoji glyph like [`Self::paint_emoji`], excluding the part inside an
+    /// [`GlyphPaintRegion::Exclude`] region. A [`GlyphPaintRegion::Recolor`] region leaves
+    /// the emoji unchanged because polychrome glyphs have no text color.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_emoji_with_region(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: GlyphPaintRegion,
+    ) -> Result<()> {
+        self.paint_emoji_impl(origin, font_id, glyph_id, font_size, Some(region))
+    }
+
+    fn paint_emoji_impl(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        region: Option<GlyphPaintRegion>,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -4865,17 +5044,31 @@ impl Window {
             };
             let content_mask = self.snapped_content_mask();
             let opacity = self.element_opacity();
+            let content_masks = match region {
+                Some(GlyphPaintRegion::Exclude(region)) => {
+                    let region = self.snap_bounds(region);
+                    match SplitContentMask::new(&content_mask, &bounds, region) {
+                        Some(split) => split.outside,
+                        None => smallvec::smallvec![content_mask],
+                    }
+                }
+                Some(GlyphPaintRegion::Recolor { .. }) | None => {
+                    smallvec::smallvec![content_mask]
+                }
+            };
 
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
-                order: 0,
-                pad: 0,
-                grayscale: false.into(),
-                bounds,
-                corner_radii: Default::default(),
-                content_mask,
-                tile,
-                opacity,
-            });
+            for content_mask in content_masks {
+                self.next_frame.scene.insert_primitive(PolychromeSprite {
+                    order: 0,
+                    pad: 0,
+                    grayscale: false.into(),
+                    bounds,
+                    corner_radii: Default::default(),
+                    content_mask,
+                    tile,
+                    opacity,
+                });
+            }
         }
         Ok(())
     }
@@ -7630,6 +7823,63 @@ impl From<[u8; 20]> for ElementId {
     }
 }
 
+/// How [`Window::paint_glyph_with_region`] and [`Window::paint_emoji_with_region`] paint the
+/// part of a glyph inside a rectangular region.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GlyphPaintRegion {
+    /// Leaves the glyph unpainted inside the region.
+    Exclude(Bounds<Pixels>),
+    /// Paints a monochrome glyph with `color` inside the region. Emoji keep their colors.
+    Recolor {
+        /// The region.
+        bounds: Bounds<Pixels>,
+        /// The monochrome glyph color inside the region.
+        color: Hsla,
+    },
+}
+
+impl GlyphPaintRegion {
+    fn bounds(self) -> Bounds<Pixels> {
+        match self {
+            Self::Exclude(bounds) | Self::Recolor { bounds, .. } => bounds,
+        }
+    }
+}
+
+/// A content mask split around a region that intersects a primitive's visible bounds.
+struct SplitContentMask {
+    /// Masks that together cover the original mask outside the region and intersect the
+    /// primitive.
+    outside: SmallVec<[ContentMask<ScaledPixels>; 4]>,
+}
+
+impl SplitContentMask {
+    /// Returns `None` when the region misses the part of `bounds` visible through
+    /// `content_mask`, so the primitive paints unsplit.
+    fn new(
+        content_mask: &ContentMask<ScaledPixels>,
+        bounds: &Bounds<ScaledPixels>,
+        region: Bounds<ScaledPixels>,
+    ) -> Option<Self> {
+        let outer = content_mask.bounds;
+        let inside = region.intersect(&outer);
+        if inside.is_empty() || !inside.intersects(bounds) {
+            return None;
+        }
+        let outside = [
+            Bounds::from_corners(outer.origin, point(inside.left(), outer.bottom())),
+            Bounds::from_corners(point(inside.right(), outer.top()), outer.bottom_right()),
+            Bounds::from_corners(point(inside.left(), outer.top()), inside.top_right()),
+            Bounds::from_corners(inside.bottom_left(), point(inside.right(), outer.bottom())),
+        ]
+        .into_iter()
+        .filter(|mask| !mask.is_empty() && mask.intersects(bounds))
+        .map(|bounds| ContentMask { bounds })
+        .collect();
+        Some(Self { outside })
+    }
+}
+
 /// A rectangle to be rendered in the window at the given position and size.
 /// Passed as an argument [`Window::paint_quad`].
 #[derive(Clone)]
@@ -9216,6 +9466,502 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    mod region_paint_tests {
+        use super::*;
+        use crate::{
+            AtlasKey, AtlasTile, DevicePixels, Font, FontId, FontMetrics, FontRun, GlyphId,
+            GlyphPaintRegion, Hsla, LineLayout, NoopTextSystem, PlatformAtlas, PlatformTextSystem,
+            RenderGlyphParams, Result, TestDispatcher, TextRenderingMode, fill, outline,
+        };
+        use std::{
+            borrow::Cow,
+            sync::{Arc, Mutex},
+        };
+
+        struct RasterTextSystem(NoopTextSystem);
+
+        struct RecordingAtlas(Arc<dyn PlatformAtlas>, Arc<Mutex<Vec<u8>>>);
+
+        impl PlatformAtlas for RecordingAtlas {
+            fn get_or_insert_with<'a>(
+                &self,
+                key: AtlasKey,
+                build: &mut dyn FnMut()
+                    -> Result<Option<(crate::Size<DevicePixels>, Cow<'a, [u8]>)>>,
+            ) -> Result<Option<AtlasTile>> {
+                if let AtlasKey::Glyph(params) = &key {
+                    self.1.lock().unwrap().push(params.dilation);
+                }
+                self.0.get_or_insert_with(key, build)
+            }
+
+            fn remove(&self, key: &AtlasKey) {
+                self.0.remove(key);
+            }
+        }
+
+        impl PlatformTextSystem for RasterTextSystem {
+            fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
+                self.0.add_fonts(fonts)
+            }
+
+            fn all_font_names(&self) -> Vec<String> {
+                self.0.all_font_names()
+            }
+
+            fn font_id(&self, descriptor: &Font) -> Result<FontId> {
+                self.0.font_id(descriptor)
+            }
+
+            fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+                self.0.font_metrics(font_id)
+            }
+
+            fn typographic_bounds(
+                &self,
+                font_id: FontId,
+                glyph_id: GlyphId,
+            ) -> Result<Bounds<f32>> {
+                self.0.typographic_bounds(font_id, glyph_id)
+            }
+
+            fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<crate::Size<f32>> {
+                self.0.advance(font_id, glyph_id)
+            }
+
+            fn glyph_for_char(&self, font_id: FontId, character: char) -> Option<GlyphId> {
+                self.0.glyph_for_char(font_id, character)
+            }
+
+            fn glyph_raster_bounds(&self, _: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+                Ok(Bounds::from_corners(
+                    point(DevicePixels(0), DevicePixels(0)),
+                    point(DevicePixels(40), DevicePixels(40)),
+                ))
+            }
+
+            fn rasterize_glyph(
+                &self,
+                params: &RenderGlyphParams,
+                raster_bounds: Bounds<DevicePixels>,
+            ) -> Result<(crate::Size<DevicePixels>, Vec<u8>)> {
+                self.0.rasterize_glyph(params, raster_bounds)
+            }
+
+            fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
+                self.0.layout_line(text, font_size, runs)
+            }
+
+            fn recommended_rendering_mode(
+                &self,
+                font_id: FontId,
+                font_size: Pixels,
+            ) -> TextRenderingMode {
+                self.0.recommended_rendering_mode(font_id, font_size)
+            }
+
+            fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
+                if color.l > 0.5 { 4 } else { 0 }
+            }
+        }
+
+        struct PaintView(Rc<dyn Fn(&mut Window)>);
+
+        impl Render for PaintView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let paint = self.0.clone();
+                canvas(|_, _, _| {}, move |_, _, window, _| paint(window)).size_full()
+            }
+        }
+
+        fn painted<R>(paint: impl Fn(&mut Window) + 'static, read: impl FnOnce(&Window) -> R) -> R {
+            painted_with_keys(paint, read).0
+        }
+
+        #[expect(
+            clippy::arc_with_non_send_sync,
+            reason = "matches Window's platform atlas ownership"
+        )]
+        fn painted_with_keys<R>(
+            paint: impl Fn(&mut Window) + 'static,
+            read: impl FnOnce(&Window) -> R,
+        ) -> (R, Vec<u8>) {
+            let keys = Arc::new(Mutex::new(Vec::new()));
+            let mut cx = TestAppContext::build_with_text_system(
+                TestDispatcher::new(0),
+                None,
+                Arc::new(RasterTextSystem(NoopTextSystem)),
+            );
+            let record = keys.clone();
+            let handle = cx.add_window(move |_, _| {
+                let record = record.clone();
+                PaintView(Rc::new(move |window| {
+                    record.lock().unwrap().clear();
+                    let atlas = window.sprite_atlas.clone();
+                    window.sprite_atlas = Arc::new(RecordingAtlas(atlas.clone(), record.clone()));
+                    paint(window);
+                    window.sprite_atlas = atlas;
+                }))
+            });
+            cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))
+                .unwrap();
+            let result = cx
+                .update_window(handle.into(), |_, window, _| read(window))
+                .unwrap();
+            let rasterized = keys.lock().unwrap().clone();
+            (result, rasterized)
+        }
+
+        fn rectangle(left: f32, top: f32, right: f32, bottom: f32) -> Bounds<Pixels> {
+            Bounds::from_corners(point(px(left), px(top)), point(px(right), px(bottom)))
+        }
+
+        fn visible_at(quads: &[crate::Quad], position: Point<ScaledPixels>) -> bool {
+            quads.iter().any(|quad| {
+                quad.bounds.contains(&position) && quad.content_mask.bounds.contains(&position)
+            })
+        }
+
+        #[test]
+        fn region_missing_quad_keeps_original_mask() {
+            let quad = fill(rectangle(10., 10., 50., 50.), hsla(0., 1., 0.5, 1.));
+            let original_quad = quad.clone();
+            let original = painted(
+                move |window| window.paint_quad(original_quad.clone()),
+                Window::painted_quads,
+            );
+            let excluded = painted(
+                move |window| {
+                    window.paint_quad_excluding_region(quad.clone(), rectangle(70., 70., 80., 80.))
+                },
+                Window::painted_quads,
+            );
+            assert_eq!(original.len(), 1);
+            assert_eq!(excluded.len(), 1);
+            assert_eq!(excluded[0].content_mask, original[0].content_mask);
+        }
+
+        #[test]
+        fn excluded_quad_covers_only_outside_region() {
+            let bounds = rectangle(10., 10., 50., 50.);
+            let region = rectangle(20., 20., 30., 30.);
+            let quads = painted(
+                move |window| {
+                    window.paint_quad_excluding_region(fill(bounds, hsla(0., 1., 0.5, 1.)), region)
+                },
+                Window::painted_quads,
+            );
+            assert_eq!(quads.len(), 4);
+            let scaled_region = region.scale(2.);
+            for quad in &quads {
+                assert!(quad.content_mask.bounds.intersects(&quad.bounds));
+                assert!(!quad.content_mask.bounds.intersects(&scaled_region));
+            }
+            for y in 20..100 {
+                for x in 20..100 {
+                    let position =
+                        point(ScaledPixels(x as f32 + 0.5), ScaledPixels(y as f32 + 0.5));
+                    assert_eq!(
+                        visible_at(&quads, position),
+                        !scaled_region.contains(&position)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn excluded_border_quad_splits_strips() {
+            let bounds = rectangle(10., 10., 50., 50.);
+            let region = rectangle(20., 9., 30., 25.);
+            let original = painted(
+                move |window| {
+                    window.paint_quad(outline(bounds, hsla(0., 1., 0.5, 1.), Default::default()))
+                },
+                Window::painted_quads,
+            );
+            let excluded = painted(
+                move |window| {
+                    window.paint_quad_excluding_region(
+                        outline(bounds, hsla(0., 1., 0.5, 1.), Default::default()),
+                        region,
+                    )
+                },
+                Window::painted_quads,
+            );
+            assert!(excluded.len() > original.len());
+            let scaled_region = region.scale(2.);
+            for quad in &excluded {
+                assert!(quad.content_mask.bounds.intersects(&quad.bounds));
+                assert!(!quad.content_mask.bounds.intersects(&scaled_region));
+            }
+            for y in 20..100 {
+                for x in 20..100 {
+                    let position =
+                        point(ScaledPixels(x as f32 + 0.5), ScaledPixels(y as f32 + 0.5));
+                    assert_eq!(
+                        visible_at(&excluded, position),
+                        visible_at(&original, position) && !scaled_region.contains(&position)
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn glyph_exclude_and_recolor_split_masks() {
+            let region = rectangle(15., 15., 25., 25.);
+            let glyph_color = hsla(0., 1., 0.5, 1.);
+            let recolor = hsla(0.5, 1., 0.5, 1.);
+            let excluded = painted(
+                move |window| {
+                    window
+                        .paint_glyph_with_region(
+                            point(px(10.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            glyph_color,
+                            GlyphPaintRegion::Exclude(region),
+                        )
+                        .unwrap()
+                },
+                Window::painted_monochrome_sprites,
+            );
+            assert_eq!(excluded.len(), 4);
+            assert!(excluded.iter().all(|sprite| {
+                sprite.color == glyph_color
+                    && sprite.content_mask.bounds.intersects(&sprite.bounds)
+                    && !sprite.content_mask.bounds.intersects(&region.scale(2.))
+            }));
+
+            let recolored = painted(
+                move |window| {
+                    window
+                        .paint_glyph_with_region(
+                            point(px(10.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            glyph_color,
+                            GlyphPaintRegion::Recolor {
+                                bounds: region,
+                                color: recolor,
+                            },
+                        )
+                        .unwrap()
+                },
+                Window::painted_monochrome_sprites,
+            );
+            assert_eq!(recolored.len(), 5);
+            assert_eq!(
+                recolored
+                    .iter()
+                    .filter(|sprite| sprite.color == glyph_color)
+                    .count(),
+                4
+            );
+            assert!(
+                recolored
+                    .iter()
+                    .filter(|sprite| sprite.color == glyph_color)
+                    .all(|sprite| { !sprite.content_mask.bounds.intersects(&region.scale(2.)) })
+            );
+            let inside: Vec<_> = recolored
+                .iter()
+                .filter(|sprite| sprite.color == recolor)
+                .collect();
+            assert_eq!(inside.len(), 1);
+            assert_eq!(inside[0].content_mask.bounds, region.scale(2.));
+        }
+
+        #[test]
+        fn glyph_recolor_uses_the_replacement_raster_tile() {
+            let black = hsla(0., 0., 0., 1.);
+            let white = hsla(0., 0., 1., 1.);
+            let sprites = painted(
+                move |window| {
+                    let paint = |window: &mut Window, x| {
+                        window.paint_glyph(
+                            point(px(x), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            white,
+                        )
+                    };
+                    paint(window, 10.).unwrap();
+                    window
+                        .paint_glyph_with_region(
+                            point(px(40.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            black,
+                            GlyphPaintRegion::Recolor {
+                                bounds: rectangle(40., 10., 60., 30.),
+                                color: white,
+                            },
+                        )
+                        .unwrap();
+                    window
+                        .paint_glyph_with_region(
+                            point(px(70.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            black,
+                            GlyphPaintRegion::Recolor {
+                                bounds: rectangle(80., 15., 90., 25.),
+                                color: white,
+                            },
+                        )
+                        .unwrap();
+                },
+                Window::painted_monochrome_sprites,
+            );
+            let normal = sprites
+                .iter()
+                .find(|sprite| sprite.bounds.origin.x.0 == 20.)
+                .unwrap();
+            let full = sprites
+                .iter()
+                .find(|sprite| sprite.bounds.origin.x.0 == 80.)
+                .unwrap();
+            assert_eq!(full.tile, normal.tile);
+            assert_eq!(full.color, white);
+            assert_eq!(
+                sprites
+                    .iter()
+                    .filter(|sprite| sprite.bounds.origin.x.0 == 80.)
+                    .count(),
+                1
+            );
+            let partial: Vec<_> = sprites
+                .iter()
+                .filter(|sprite| sprite.bounds.origin.x.0 == 140.)
+                .collect();
+            let partial_region = rectangle(80., 15., 90., 25.).scale(2.);
+            assert!(partial.iter().any(|sprite| sprite.color == white
+                && sprite.tile == normal.tile
+                && sprite.content_mask.bounds == partial_region));
+            assert!(partial.iter().any(|sprite| sprite.color == black
+                && sprite.tile != normal.tile
+                && !sprite.content_mask.bounds.intersects(&partial_region)));
+        }
+
+        #[test]
+        fn glyph_recolor_prepares_both_dilations_under_empty_mask() {
+            let (sprites, keys) = painted_with_keys(
+                |window| {
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: rectangle(8.125, 14.125, 8.125, 14.125),
+                        }),
+                        |window| {
+                            window
+                                .paint_glyph_with_region(
+                                    point(px(10.), px(10.)),
+                                    FontId(1),
+                                    GlyphId(1),
+                                    px(20.),
+                                    hsla(0., 0., 0., 1.),
+                                    GlyphPaintRegion::Recolor {
+                                        bounds: rectangle(15., 15., 25., 25.),
+                                        color: hsla(0., 0., 1., 1.),
+                                    },
+                                )
+                                .unwrap();
+                        },
+                    );
+                },
+                Window::painted_monochrome_sprites,
+            );
+            assert!(sprites.is_empty());
+            assert_eq!(keys, [0, 4]);
+        }
+
+        #[test]
+        fn glyph_recolor_with_matching_dilation_makes_one_lookup_under_empty_mask() {
+            let (sprites, keys) = painted_with_keys(
+                |window| {
+                    window.with_content_mask(
+                        Some(ContentMask {
+                            bounds: rectangle(8.125, 14.125, 8.125, 14.125),
+                        }),
+                        |window| {
+                            window
+                                .paint_glyph_with_region(
+                                    point(px(10.), px(10.)),
+                                    FontId(1),
+                                    GlyphId(1),
+                                    px(20.),
+                                    hsla(0., 0., 0., 1.),
+                                    GlyphPaintRegion::Recolor {
+                                        bounds: rectangle(15., 15., 25., 25.),
+                                        color: hsla(0.5, 1., 0.5, 1.),
+                                    },
+                                )
+                                .unwrap();
+                        },
+                    );
+                },
+                Window::painted_monochrome_sprites,
+            );
+            assert!(sprites.is_empty());
+            assert_eq!(keys, [0]);
+        }
+
+        #[test]
+        fn emoji_exclude_splits_and_recolor_keeps_original() {
+            let region = rectangle(15., 15., 25., 25.);
+            let excluded = painted(
+                move |window| {
+                    window
+                        .paint_emoji_with_region(
+                            point(px(10.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            GlyphPaintRegion::Exclude(region),
+                        )
+                        .unwrap()
+                },
+                Window::painted_polychrome_sprites,
+            );
+            assert_eq!(excluded.len(), 4);
+            assert!(excluded.iter().all(|sprite| {
+                sprite.content_mask.bounds.intersects(&sprite.bounds)
+                    && !sprite.content_mask.bounds.intersects(&region.scale(2.))
+            }));
+            let recolored = painted(
+                move |window| {
+                    window
+                        .paint_emoji_with_region(
+                            point(px(10.), px(10.)),
+                            FontId(1),
+                            GlyphId(1),
+                            px(20.),
+                            GlyphPaintRegion::Recolor {
+                                bounds: region,
+                                color: hsla(0., 1., 0.5, 1.),
+                            },
+                        )
+                        .unwrap()
+                },
+                Window::painted_polychrome_sprites,
+            );
+            let original = painted(
+                move |window| {
+                    window
+                        .paint_emoji(point(px(10.), px(10.)), FontId(1), GlyphId(1), px(20.))
+                        .unwrap()
+                },
+                Window::painted_polychrome_sprites,
+            );
+            assert_eq!(recolored.len(), 1);
+            assert_eq!(recolored[0].content_mask, original[0].content_mask);
+        }
     }
 }
 
