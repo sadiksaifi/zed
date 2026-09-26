@@ -2646,10 +2646,26 @@ mod tests {
         PolychromeSprite, Quad, Shadow, Size, SubpixelSprite, Underline, linear_color_stop,
         linear_gradient,
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     use gpui::{DevicePixels, PlatformHeadlessRenderer, Scene};
+    #[cfg(not(target_family = "wasm"))]
+    use std::sync::{Mutex, MutexGuard};
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
+    static HEADLESS_RENDERER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(not(target_family = "wasm"))]
+    fn serial_headless_renderer() -> anyhow::Result<(MutexGuard<'static, ()>, WgpuHeadlessRenderer)>
+    {
+        // Each renderer creates a device. Hold the lock through rendering so parallel tests
+        // cannot exhaust the adapter's device capacity.
+        let guard = HEADLESS_RENDERER_TEST_LOCK
+            .lock()
+            .expect("headless renderer test lock poisoned");
+        Ok((guard, WgpuHeadlessRenderer::new()?))
+    }
+
+    #[cfg(not(target_family = "wasm"))]
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
         Size {
             width: DevicePixels(width),
@@ -2657,7 +2673,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     fn solid_quad(x: f32, y: f32, width: f32, height: f32, color: Hsla) -> Quad {
         let bounds = Bounds {
             origin: Point {
@@ -2683,7 +2699,7 @@ mod tests {
 
     /// Channels are compared with a small tolerance so the assertions hold across
     /// drivers without pinning exact rasterizer output.
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     fn assert_pixel(image: &image::RgbaImage, x: u32, y: u32, expected: [u8; 4]) {
         let actual = image.get_pixel(x, y).0;
         assert!(
@@ -2695,17 +2711,17 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     const RED: [u8; 4] = [255, 0, 0, 255];
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     const BLUE: [u8; 4] = [0, 0, 255, 255];
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     const BLACK: [u8; 4] = [0, 0, 0, 255];
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn headless_renderer_draws_quads_with_distinct_colors() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let (_guard, mut renderer) = serial_headless_renderer()?;
         let mut scene = Scene::default();
         scene.insert_primitive(solid_quad(0.0, 0.0, 32.0, 32.0, gpui::red()));
         scene.insert_primitive(solid_quad(32.0, 0.0, 32.0, 32.0, gpui::blue()));
@@ -2720,10 +2736,10 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn headless_renderer_captures_each_requested_size() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let (_guard, mut renderer) = serial_headless_renderer()?;
         let mut scene = Scene::default();
         scene.insert_primitive(solid_quad(2.0, 2.0, 4.0, 3.0, gpui::red()));
         scene.finish();
@@ -2746,10 +2762,10 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn headless_renderer_reuses_target_for_same_size() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let (_guard, mut renderer) = serial_headless_renderer()?;
         let target_texture = |renderer: &WgpuHeadlessRenderer| {
             renderer
                 .render_target
@@ -2769,10 +2785,10 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn headless_renderer_rejects_invalid_sizes() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let (_guard, mut renderer) = serial_headless_renderer()?;
         let too_large = renderer.core.max_texture_size as i32 + 1;
 
         for size in [
@@ -2799,10 +2815,10 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn headless_renderer_backdrop_filter_blurs_earlier_primitives_only() -> anyhow::Result<()> {
-        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let (_guard, mut renderer) = serial_headless_renderer()?;
         let bounds = |x: f32, y: f32, width: f32, height: f32| Bounds {
             origin: Point {
                 x: x.into(),

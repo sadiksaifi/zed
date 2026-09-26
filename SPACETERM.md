@@ -39,6 +39,12 @@ cargo test -p gpui_macos --features font-kit,test-support
 cargo test -p gpui_wgpu
 ```
 
+The five `gpui_wgpu` headless renderer tests run on native platforms and serialize their GPU
+device use within the test process. Each test creates a device, so concurrent tests can contend
+for the adapter's device capacity. Headless contexts enumerate all native backends, including
+Metal on macOS. Previously they used the window context's Vulkan/GL-only instance, which
+enumerated no macOS adapter; the Linux-only test gate hid that failure on macOS.
+
 Windows cross check:
 
 ```sh

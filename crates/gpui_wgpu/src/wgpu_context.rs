@@ -173,12 +173,18 @@ impl WgpuContext {
         any(test, feature = "bench-support", feature = "test-support")
     ))]
     pub(crate) fn new_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let instance = Self::instance(None);
+        let instance = Self::instance_with_backends(wgpu::Backends::all(), None);
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
                 let mut adapters = instance.enumerate_adapters(wgpu::Backends::all()).await;
+                anyhow::ensure!(
+                    !adapters.is_empty(),
+                    "No usable headless GPU adapter found: no adapters enumerated"
+                );
                 Self::sort_adapters(&mut adapters, device_id_filter, None);
+                let mut unsupported_formats = 0;
+                let mut device_failures = 0;
 
                 for adapter in adapters {
                     let adapter_info = adapter.get_info();
@@ -187,6 +193,7 @@ impl WgpuContext {
                             "Adapter {:?} has no supported headless render target format",
                             adapter_info.name
                         );
+                        unsupported_formats += 1;
                         continue;
                     };
 
@@ -210,6 +217,7 @@ impl WgpuContext {
                             ));
                         }
                         Err(error) => {
+                            device_failures += 1;
                             log::warn!(
                                 "Failed to create a headless device for adapter {:?}: {error:#}",
                                 adapter_info.name
@@ -218,7 +226,9 @@ impl WgpuContext {
                     }
                 }
 
-                anyhow::bail!("No usable headless GPU adapter found")
+                anyhow::bail!(
+                    "No usable headless GPU adapter found: {unsupported_formats} lack a render target format, {device_failures} failed device creation"
+                )
             })?;
 
         Ok((
@@ -441,8 +451,16 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
+        Self::instance_with_backends(wgpu::Backends::VULKAN | wgpu::Backends::GL, display)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn instance_with_backends(
+        backends: wgpu::Backends,
+        display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>,
+    ) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            backends,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
