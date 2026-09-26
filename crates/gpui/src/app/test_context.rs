@@ -492,6 +492,16 @@ impl TestAppContext {
             .simulate_scale_factor_change(scale_factor);
     }
 
+    /// Returns every traffic light position the window was asked to use, oldest first.
+    #[cfg(target_os = "macos")]
+    pub fn traffic_light_position_updates(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Vec<Point<Pixels>> {
+        self.test_window(window_handle)
+            .traffic_light_position_updates()
+    }
+
     /// Returns true if there's an alert dialog open.
     pub fn expect_restart(&self) -> oneshot::Receiver<(Option<PathBuf>, Vec<std::ffi::OsString>)> {
         let (tx, rx) = futures::channel::oneshot::channel();

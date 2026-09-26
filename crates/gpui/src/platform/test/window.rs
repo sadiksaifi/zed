@@ -51,6 +51,8 @@ pub(crate) struct TestWindowState {
     input_handler: Option<PlatformInputHandler>,
     text_input_configurations: Vec<TextInputConfiguration>,
     text_input_state_changes: Vec<TextInputStateChange>,
+    #[cfg(target_os = "macos")]
+    traffic_light_position_updates: Vec<Point<Pixels>>,
     is_fullscreen: bool,
     scale_factor: f32,
     appearance: WindowAppearance,
@@ -124,6 +126,8 @@ impl TestWindow {
             input_handler: None,
             text_input_configurations: Vec::new(),
             text_input_state_changes: Vec::new(),
+            #[cfg(target_os = "macos")]
+            traffic_light_position_updates: Vec::new(),
             is_fullscreen: false,
             // Preserve the test platform's historical 2x default.
             scale_factor: 2.0,
@@ -208,6 +212,11 @@ impl TestWindow {
         self.0.lock().text_input_state_changes.clone()
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn traffic_light_position_updates(&self) -> Vec<Point<Pixels>> {
+        self.0.lock().traffic_light_position_updates.clone()
+    }
+
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
         let scale_factor = self.scale_factor();
         let mut lock = self.0.lock();
@@ -290,6 +299,11 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
+    #[cfg(target_os = "macos")]
+    fn set_traffic_light_position(&self, position: Point<Pixels>) {
+        self.0.lock().traffic_light_position_updates.push(position);
+    }
+
     fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
         let state = self.0.lock();
         state

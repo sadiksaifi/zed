@@ -766,8 +766,20 @@ mod lenient_font_attributes {
 
 #[cfg(test)]
 mod tests {
-    use crate::MacTextSystem;
+    use super::MacTextSystem;
     use gpui::{FontRun, GlyphId, PlatformTextSystem, font, px};
+    use std::sync::Arc;
+
+    #[test]
+    fn window_text_system_can_be_created_off_main_thread() {
+        std::thread::spawn(|| {
+            let _: gpui::WindowTextSystem = gpui::WindowTextSystem::new(Arc::new(
+                gpui::TextSystem::new(Arc::new(MacTextSystem::new())),
+            ));
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn test_layout_line_bom_char() {

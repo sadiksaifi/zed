@@ -54,8 +54,8 @@ pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
 
-#[cfg(feature = "font-kit")]
-pub(crate) use text_system::*;
+#[cfg(all(feature = "font-kit", feature = "test-support"))]
+pub use text_system::MacTextSystem;
 
 pub use platform::MacPlatform;
 

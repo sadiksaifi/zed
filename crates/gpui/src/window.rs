@@ -9963,6 +9963,24 @@ mod tests {
             assert_eq!(recolored[0].content_mask, original[0].content_mask);
         }
     }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn test_traffic_light_position_updates(cx: &mut TestAppContext) {
+        let handle = cx.add_window(|_, _| EmptyView);
+        let first = point(px(12.), px(18.));
+        let second = point(px(24.), px(30.));
+        cx.update_window(handle.into(), |_, window, _| {
+            window.set_traffic_light_position(first);
+            window.set_traffic_light_position(second);
+        })
+        .unwrap();
+
+        assert_eq!(
+            cx.traffic_light_position_updates(handle.into()),
+            vec![first, second]
+        );
+    }
 }
 
 #[cfg(all(test, any(feature = "inspector", debug_assertions)))]
