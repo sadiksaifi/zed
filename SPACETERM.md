@@ -1,6 +1,7 @@
 # SpaceTerm fork
 
 SpaceTerm uses this Zed fork as a Cargo git dependency pinned to a `spaceterm-YYYY-MM-DD` tag.
+Published tags are immutable. Another release on the same date adds `.1`, `.2`, and so on.
 
 ## Patches
 
@@ -19,12 +20,15 @@ SpaceTerm uses this Zed fork as a Cargo git dependency pinned to a `spaceterm-YY
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.
 2. Run the validation commands below.
-3. Create the dated tag with `git tag spaceterm-YYYY-MM-DD`.
-4. Push the rebased branch with `git push --force-with-lease origin spaceterm`, then push the tag with `git push origin spaceterm-YYYY-MM-DD`.
-5. Update the tag in SpaceTerm's `Cargo.toml`, set SpaceTerm's `rust-toolchain.toml` channel to
-   this fork's channel, and run SpaceTerm's validation. SpaceTerm builds the same dependencies as
-   Zed, so the same toolchain keeps upstream compiler fixes, such as the future-incompatibility
-   warning in `block` 0.1.6 pulled in by `cocoa`, owned by Zed.
+3. Create the tag with `git tag -a <tag>`. Use `spaceterm-YYYY-MM-DD` for the first release of the
+   day and the next numeric suffix for another release that day. Never move or delete a published tag.
+4. Push the rebased branch with `git push --force-with-lease origin spaceterm`, then push the tag with
+   `git push origin <tag>`.
+5. In SpaceTerm, run `mise run gpui:bump <tag>`, then `mise run validate` and `mise run test:macos`.
+   The task updates every fork tag, the fork crates in `Cargo.lock`, and the Rust toolchain channel
+   to match this fork. SpaceTerm builds the same dependencies as Zed, so the same toolchain keeps
+   upstream compiler fixes, such as the future-incompatibility warning in `block` 0.1.6 pulled in by
+   `cocoa`, owned by Zed.
 
 ## Validation
 
