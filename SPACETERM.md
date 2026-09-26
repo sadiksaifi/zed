@@ -20,7 +20,10 @@ SpaceTerm uses this Zed fork as a Cargo git dependency pinned to a `spaceterm-YY
 2. Run the validation commands below.
 3. Create the dated tag with `git tag spaceterm-YYYY-MM-DD`.
 4. Push the rebased branch with `git push --force-with-lease origin spaceterm`, then push the tag with `git push origin spaceterm-YYYY-MM-DD`.
-5. Update the tag in SpaceTerm's `Cargo.toml` and run SpaceTerm's validation.
+5. Update the tag in SpaceTerm's `Cargo.toml`, set SpaceTerm's `rust-toolchain.toml` channel to
+   this fork's channel, and run SpaceTerm's validation. SpaceTerm builds the same dependencies as
+   Zed, so the same toolchain keeps upstream compiler fixes, such as the future-incompatibility
+   warning in `block` 0.1.6 pulled in by `cocoa`, owned by Zed.
 
 ## Validation
 
