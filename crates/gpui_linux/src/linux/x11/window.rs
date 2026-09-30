@@ -1700,6 +1700,10 @@ impl PlatformWindow for X11Window {
         set_wm_hints_urgency(&self.0.xcb, self.0.x_window, true);
     }
 
+    fn cancel_attention(&self) {
+        set_wm_hints_urgency(&self.0.xcb, self.0.x_window, false);
+    }
+
     fn is_active(&self) -> bool {
         self.0.state.borrow().active
     }

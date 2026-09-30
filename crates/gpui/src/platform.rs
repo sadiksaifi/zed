@@ -959,6 +959,9 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn activate(&self);
     /// Requests that the operating system draw attention to this window.
     fn request_attention(&self) {}
+    /// Withdraws a request made with [`Self::request_attention`] before the window becomes
+    /// active, where the platform can withdraw one.
+    fn cancel_attention(&self) {}
     fn is_active(&self) -> bool;
     /// The current [`WindowVisibility`]. Read once when the window is created;
     /// afterwards changes arrive through [`Self::on_visibility_change`].

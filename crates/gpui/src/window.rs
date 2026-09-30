@@ -6759,6 +6759,13 @@ impl Window {
         self.platform_window.request_attention();
     }
 
+    /// Withdraws a request made with [`Self::request_attention`] before the window becomes
+    /// active. X11 clears the urgency hint; other platforms keep the request until the
+    /// window is activated.
+    pub fn cancel_attention(&self) {
+        self.platform_window.cancel_attention();
+    }
+
     /// Minimize the current window at the platform level.
     pub fn minimize_window(&self) {
         self.platform_window.minimize();
