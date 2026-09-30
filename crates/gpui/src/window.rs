@@ -2901,8 +2901,8 @@ impl Window {
         self.a11y.set_window_title(title.to_string());
     }
 
-    /// Sets the position of the macOS traffic light buttons.
-    #[cfg(target_os = "macos")]
+    /// Sets the position of the macOS traffic light buttons. Other platforms
+    /// have no traffic lights and ignore it.
     pub fn set_traffic_light_position(&self, position: Point<Pixels>) {
         self.platform_window.set_traffic_light_position(position);
     }
@@ -10231,7 +10231,6 @@ mod tests {
         cx.activate_accessibility(window.into());
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui::test]
     fn test_traffic_light_position_updates(cx: &mut TestAppContext) {
         let handle = cx.add_window(|_, _| EmptyView);

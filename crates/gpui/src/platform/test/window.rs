@@ -80,7 +80,6 @@ pub(crate) struct TestWindowState {
     a11y_callbacks: Option<Rc<A11yCallbacks>>,
     text_input_configurations: Vec<TextInputConfiguration>,
     text_input_state_changes: Vec<TextInputStateChange>,
-    #[cfg(target_os = "macos")]
     traffic_light_position_updates: Vec<Point<Pixels>>,
     requests: Vec<TestWindowRequest>,
     decorations: Decorations,
@@ -161,7 +160,6 @@ impl TestWindow {
             a11y_callbacks: None,
             text_input_configurations: Vec::new(),
             text_input_state_changes: Vec::new(),
-            #[cfg(target_os = "macos")]
             traffic_light_position_updates: Vec::new(),
             requests: Vec::new(),
             decorations: Decorations::Server,
@@ -251,7 +249,6 @@ impl TestWindow {
         self.0.lock().text_input_state_changes.clone()
     }
 
-    #[cfg(target_os = "macos")]
     pub fn traffic_light_position_updates(&self) -> Vec<Point<Pixels>> {
         self.0.lock().traffic_light_position_updates.clone()
     }
@@ -400,7 +397,6 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
-    #[cfg(target_os = "macos")]
     fn set_traffic_light_position(&self, position: Point<Pixels>) {
         self.0.lock().traffic_light_position_updates.push(position);
     }

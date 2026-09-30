@@ -494,7 +494,6 @@ impl TestAppContext {
     }
 
     /// Returns every traffic light position the window was asked to use, oldest first.
-    #[cfg(target_os = "macos")]
     pub fn traffic_light_position_updates(
         &self,
         window_handle: AnyWindowHandle,

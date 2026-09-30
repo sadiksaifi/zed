@@ -979,7 +979,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn is_simple_fullscreen(&self) -> bool {
         false
     }
-    #[cfg(target_os = "macos")]
+    /// Sets the position of the macOS traffic light buttons. Other platforms
+    /// have no traffic lights and ignore it.
     fn set_traffic_light_position(&self, _position: Point<Pixels>) {}
     fn show_character_palette(&self) {}
     fn titlebar_double_click(&self, _is_resizable: bool, _is_minimizable: bool) {}
