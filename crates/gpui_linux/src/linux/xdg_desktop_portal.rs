@@ -9,6 +9,8 @@ use smol::stream::StreamExt;
 
 use gpui::{BackgroundExecutor, WindowAppearance};
 
+use crate::linux::TitlebarDoubleClickAction;
+
 pub enum Event {
     WindowAppearance(WindowAppearance),
     #[cfg_attr(feature = "x11", allow(dead_code))]
@@ -16,6 +18,7 @@ pub enum Event {
     #[cfg_attr(feature = "x11", allow(dead_code))]
     CursorSize(u32),
     ButtonLayout(String),
+    TitlebarDoubleClickAction(TitlebarDoubleClickAction),
 }
 
 pub struct XDPEventSource {
@@ -57,6 +60,18 @@ impl XDPEventSource {
                     .await
                 {
                     sender.send(Event::ButtonLayout(initial_layout))?;
+                }
+
+                if let Ok(initial_action) = settings
+                    .read::<String>(
+                        "org.gnome.desktop.wm.preferences",
+                        "action-double-click-titlebar",
+                    )
+                    .await
+                {
+                    sender.send(Event::TitlebarDoubleClickAction(
+                        TitlebarDoubleClickAction::parse(&initial_action),
+                    ))?;
                 }
 
                 if let Ok(mut cursor_theme_changed) = settings
@@ -110,6 +125,27 @@ impl XDPEventSource {
                             while let Some(layout) = button_layout_changed.next().await {
                                 let layout = layout?;
                                 sender.send(Event::ButtonLayout(layout))?;
+                            }
+                            anyhow::Ok(())
+                        })
+                        .detach();
+                }
+
+                if let Ok(mut titlebar_action_changed) = settings
+                    .receive_setting_changed_with_args::<String>(
+                        "org.gnome.desktop.wm.preferences",
+                        "action-double-click-titlebar",
+                    )
+                    .await
+                {
+                    let sender = sender.clone();
+                    background
+                        .spawn(async move {
+                            while let Some(action) = titlebar_action_changed.next().await {
+                                let action = action?;
+                                sender.send(Event::TitlebarDoubleClickAction(
+                                    TitlebarDoubleClickAction::parse(&action),
+                                ))?;
                             }
                             anyhow::Ok(())
                         })

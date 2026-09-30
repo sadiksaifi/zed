@@ -968,6 +968,11 @@ impl WaylandClient {
                             }
                         }
                     }
+                    XDPEvent::TitlebarDoubleClickAction(action) => {
+                        if let Some(client) = client.0.upgrade() {
+                            client.borrow_mut().common.titlebar_double_click_action = action;
+                        }
+                    }
                     XDPEvent::CursorTheme(theme) => {
                         if let Some(client) = client.0.upgrade() {
                             let mut client = client.borrow_mut();

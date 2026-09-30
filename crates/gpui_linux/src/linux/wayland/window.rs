@@ -31,7 +31,7 @@ use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
-use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
+use crate::linux::{Globals, Output, TitlebarDoubleClickAction, WaylandClientStatePtr, get_window};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
     Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
@@ -1985,6 +1985,23 @@ impl PlatformWindow for WaylandWindow {
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         let state = self.borrow();
         state.renderer.sprite_atlas().clone()
+    }
+
+    fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
+        let action = self
+            .borrow()
+            .client
+            .get_client()
+            .borrow()
+            .common
+            .titlebar_double_click_action;
+        match action.for_window(is_resizable, is_minimizable) {
+            TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
+            TitlebarDoubleClickAction::Minimize => self.minimize(),
+            TitlebarDoubleClickAction::Menu => self.show_window_menu(self.mouse_position()),
+            // Wayland clients cannot restack their windows.
+            TitlebarDoubleClickAction::Lower | TitlebarDoubleClickAction::None => {}
+        }
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {

@@ -1,7 +1,7 @@
 use anyhow::{Context as _, anyhow};
 use x11rb::connection::RequestConnection;
 
-use crate::linux::X11ClientStatePtr;
+use crate::linux::{TitlebarDoubleClickAction, X11ClientStatePtr};
 use gpui::{
     AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
@@ -1009,6 +1009,19 @@ impl X11Window {
         )
     }
 
+    /// Asks the window manager to move this window below its siblings.
+    fn lower(&self) {
+        check_reply(
+            || "X11 ConfigureWindow to lower window failed.",
+            self.0.xcb.configure_window(
+                self.0.x_window,
+                &xproto::ConfigureWindowAux::new().stack_mode(xproto::StackMode::BELOW),
+            ),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
     fn send_moveresize(&self, flag: u32) -> anyhow::Result<()> {
         let state = self.0.state.borrow();
 
@@ -1777,6 +1790,26 @@ impl PlatformWindow for X11Window {
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         let inner = self.0.state.borrow();
         inner.renderer.sprite_atlas().clone()
+    }
+
+    fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
+        let Some(action) = self
+            .0
+            .state
+            .borrow()
+            .client
+            .get_client()
+            .map(|client| client.0.borrow().common.titlebar_double_click_action)
+        else {
+            return;
+        };
+        match action.for_window(is_resizable, is_minimizable) {
+            TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
+            TitlebarDoubleClickAction::Minimize => self.minimize(),
+            TitlebarDoubleClickAction::Menu => self.show_window_menu(self.mouse_position()),
+            TitlebarDoubleClickAction::Lower => self.lower(),
+            TitlebarDoubleClickAction::None => {}
+        }
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {

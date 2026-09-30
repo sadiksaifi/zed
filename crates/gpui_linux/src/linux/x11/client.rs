@@ -518,6 +518,9 @@ impl X11Client {
                             window.window.set_button_layout();
                         }
                     }
+                    XDPEvent::TitlebarDoubleClickAction(action) => {
+                        client.with_common(|common| common.titlebar_double_click_action = action);
+                    }
                     XDPEvent::CursorTheme(_) | XDPEvent::CursorSize(_) => {
                         // noop, X11 manages this for us.
                     }

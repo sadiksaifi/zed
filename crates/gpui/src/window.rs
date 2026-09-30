@@ -6998,8 +6998,12 @@ impl Window {
         self.platform_window.gpu_specs()
     }
 
-    /// Perform titlebar double-click action.
-    /// This is macOS specific.
+    /// Performs the desktop's titlebar double-click action, such as zooming or minimizing the
+    /// window, following the user's system setting.
+    ///
+    /// Call this when the user double-clicks a client-drawn titlebar. Supported on macOS and
+    /// Linux (Wayland and X11); a no-op elsewhere. Actions the window does not allow, such as
+    /// zooming a non-resizable window, do nothing.
     pub fn titlebar_double_click(&self) {
         self.platform_window
             .titlebar_double_click(self.is_resizable, self.is_minimizable);
