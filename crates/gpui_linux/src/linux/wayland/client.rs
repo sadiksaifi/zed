@@ -1,6 +1,7 @@
 use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
+    mem,
     os::fd::{AsRawFd, BorrowedFd},
     path::PathBuf,
     rc::{Rc, Weak},
@@ -332,6 +333,8 @@ pub(crate) struct WaylandClientState {
     text_input: Option<zwp_text_input_v3::ZwpTextInputV3>,
     pre_edit_text: Option<String>,
     ime_pre_edit: Option<String>,
+    /// Whether the focused window shows the input method's pre-edit as marked text.
+    ime_marked_text: bool,
     composing: bool,
     last_ime_cursor_rectangle: Option<ImeCursorRectangle>,
     // Surface to Window mapping
@@ -656,6 +659,7 @@ impl WaylandClientStatePtr {
         let client = self.get_client();
         let mut state = client.borrow_mut();
         state.ime_enabled = Some(false);
+        state.ime_marked_text = false;
         state.composing = false;
         if let Some(text_input) = &state.text_input {
             text_input.disable();
@@ -1002,6 +1006,7 @@ impl WaylandClient {
             text_input: None,
             pre_edit_text: None,
             ime_pre_edit: None,
+            ime_marked_text: false,
             composing: false,
             last_ime_cursor_rectangle: None,
             outputs: HashMap::default(),
@@ -1800,6 +1805,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                 if let Some(text_input) = state.text_input.take() {
                     text_input.destroy();
                     state.ime_pre_edit = None;
+                    state.ime_marked_text = false;
                     state.composing = false;
                 }
 
@@ -2108,10 +2114,13 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 };
 
                 if let Some(commit_text) = text {
+                    // Committing replaces the marked pre-edit, so it must go through the input
+                    // handler even when the text is a single key.
+                    let replaces_marked_text = mem::take(&mut state.ime_marked_text);
                     drop(state);
                     // IBus Intercepts keys like `a`, `b`, but those keys are needed for vim mode.
                     // We should only send ASCII characters to Zed, otherwise a user could remap a letter like `か` or `相`.
-                    if commit_text.len() == 1 {
+                    if commit_text.len() == 1 && !replaces_marked_text {
                         window.handle_input(PlatformInput::KeyDown(KeyDownEvent {
                             keystroke: Keystroke {
                                 modifiers: Modifiers::default(),
@@ -2138,6 +2147,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                 };
 
                 if let Some(text) = state.ime_pre_edit.take() {
+                    state.ime_marked_text = !text.is_empty();
                     drop(state);
                     window.handle_ime(ImeInput::SetMarkedText(text));
                     if let Some(area) = window.get_ime_area() {
@@ -2151,6 +2161,7 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
                     }
                 } else {
                     state.composing = false;
+                    state.ime_marked_text = false;
                     drop(state);
                     window.handle_ime(ImeInput::DeleteText);
                 }
