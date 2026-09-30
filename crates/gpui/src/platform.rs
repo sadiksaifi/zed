@@ -682,6 +682,9 @@ impl WindowButtonLayout {
     }
 
     /// Parses a GNOME-style `button-layout` string (e.g. `"close,minimize:maximize"`).
+    ///
+    /// Non-button items (`appmenu`, `menu`, `icon` and `spacer`) are accepted and skipped, so
+    /// GNOME's default `"appmenu:close"` yields a single close button.
     pub fn parse(layout_string: &str) -> Result<Self> {
         fn parse_side(
             s: &str,
@@ -699,6 +702,10 @@ impl WindowButtonLayout {
                     "minimize" => Some(WindowButton::Minimize),
                     "maximize" => Some(WindowButton::Maximize),
                     "close" => Some(WindowButton::Close),
+                    // Known titlebar items that are not window control buttons:
+                    // GNOME's application menu, the GTK window menu and icon,
+                    // and Metacity's spacer.
+                    "appmenu" | "menu" | "icon" | "spacer" => None,
                     other => {
                         unrecognized.push(other.to_string());
                         None
@@ -3451,6 +3458,37 @@ mod tests {
 
         let round_tripped = WindowButtonLayout::parse(&layout.format()).unwrap();
         assert_eq!(round_tripped, layout);
+    }
+
+    #[test]
+    fn test_window_button_layout_parse_gnome_default() {
+        let layout = WindowButtonLayout::parse("appmenu:close").unwrap();
+        assert_eq!(layout.left, [None, None, None]);
+        assert_eq!(layout.right, [Some(WindowButton::Close), None, None]);
+    }
+
+    #[test]
+    fn test_window_button_layout_parse_non_button_items_only() {
+        for case in ["appmenu:", "icon,menu:spacer", "appmenu"] {
+            let layout = WindowButtonLayout::parse(case).unwrap();
+            assert_eq!(layout.left, [None, None, None], "{case}");
+            assert_eq!(layout.right, [None, None, None], "{case}");
+        }
+    }
+
+    #[test]
+    fn test_window_button_layout_parse_skips_non_button_items() {
+        let layout =
+            WindowButtonLayout::parse("icon,close,spacer,minimize:appmenu,maximize").unwrap();
+        assert_eq!(
+            layout.left,
+            [
+                Some(WindowButton::Close),
+                Some(WindowButton::Minimize),
+                None
+            ]
+        );
+        assert_eq!(layout.right, [Some(WindowButton::Maximize), None, None]);
     }
 
     #[test]
