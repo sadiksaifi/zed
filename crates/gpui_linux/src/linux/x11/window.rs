@@ -29,8 +29,15 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 
+use calloop::ping::Ping;
 use std::{
-    cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    fmt::Display,
+    num::NonZeroU32,
+    ptr::NonNull,
+    rc::Rc,
+    sync::Arc,
 };
 
 use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
@@ -351,8 +358,50 @@ impl X11WindowState {
 pub(crate) struct X11WindowStatePtr {
     pub state: Rc<RefCell<X11WindowState>>,
     pub(crate) callbacks: Rc<RefCell<Callbacks>>,
+    pub(crate) frame_demand: Rc<FrameDemand>,
     xcb: Rc<XCBConnection>,
     pub(crate) x_window: xproto::Window,
+}
+
+/// Whether a window wants frames, shared between the window and its client's refresh timer.
+///
+/// The client parks a visible window's refresh timer after a tick in which the window requested
+/// no further frame, and restarts it when the window requests one.
+pub(crate) struct FrameDemand {
+    requested: Cell<bool>,
+    parked: Cell<bool>,
+    wake: Ping,
+}
+
+impl FrameDemand {
+    fn new(wake: Ping) -> Self {
+        Self {
+            requested: Cell::new(false),
+            parked: Cell::new(false),
+            wake,
+        }
+    }
+
+    /// Requests a frame, waking the client when the window's refresh timer is parked.
+    pub(crate) fn request(&self) {
+        self.requested.set(true);
+        if self.parked.get() {
+            self.wake.ping();
+        }
+    }
+
+    /// Clears the request before a tick, so the tick sees whether the frame asked for another.
+    pub(crate) fn take_request(&self) -> bool {
+        self.requested.replace(false)
+    }
+
+    pub(crate) fn is_requested(&self) -> bool {
+        self.requested.get()
+    }
+
+    pub(crate) fn set_parked(&self, parked: bool) {
+        self.parked.set(parked);
+    }
 }
 
 impl rwh::HasWindowHandle for RawWindow {
@@ -998,6 +1047,7 @@ impl X11Window {
         parent_window: Option<X11WindowStatePtr>,
         supports_xinput_gestures: bool,
         is_bgr: bool,
+        frame_wake: Ping,
     ) -> anyhow::Result<Self> {
         let ptr = X11WindowStatePtr {
             state: Rc::new(RefCell::new(X11WindowState::new(
@@ -1019,6 +1069,7 @@ impl X11Window {
                 is_bgr,
             )?)),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
+            frame_demand: Rc::new(FrameDemand::new(frame_wake)),
             xcb: xcb.clone(),
             x_window,
         };
@@ -1836,6 +1887,8 @@ impl PlatformWindow for X11Window {
             }
 
             inner.force_render_after_recovery = true;
+            drop(inner);
+            self.0.frame_demand.request();
             return;
         }
 
@@ -1843,7 +1896,18 @@ impl PlatformWindow for X11Window {
 
         if inner.renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
+            drop(inner);
+            self.0.frame_demand.request();
         }
+    }
+
+    fn schedule_frame(&self) {
+        self.0.frame_demand.request();
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frame_demand = self.0.frame_demand.clone();
+        Some(Rc::new(move || frame_demand.request()))
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
