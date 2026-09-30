@@ -51,15 +51,16 @@ use super::{
 
 use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
-    get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
-    keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, new_xkb_context,
-    open_uri_internal,
+    get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb, log_cursor_icon_warning,
+    modifiers_from_xkb, new_xkb_context, open_uri_internal,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
     reveal_path_internal,
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
 use crate::linux::{
-    LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info,
+    LinuxCommon, LinuxKeyboardLayout, X11Window,
+    compose::{ComposeText, feed_compose},
+    modifiers_from_xinput_info,
     xkb_facts::{modifier_key_changed_event, modifier_key_event, native_key_event},
 };
 
@@ -1104,57 +1105,39 @@ impl X11Client {
                 }
 
                 let native = native_key_event(&key_event_state, code);
-                let keystroke = {
-                    let mut keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
-
-                    if let Some(mut compose_state) = state.compose_state.take() {
-                        compose_state.feed(keysym);
-                        match compose_state.status() {
-                            xkbc::Status::Composed => {
-                                state.pre_edit_text.take();
-                                keystroke.key_char = compose_state.utf8();
-                                if let Some(keysym) = compose_state.keysym() {
-                                    keystroke.key = xkbc::keysym_get_name(keysym);
-                                }
-                            }
-                            xkbc::Status::Composing => {
-                                keystroke.key_char = None;
-                                state.pre_edit_text = compose_state
-                                    .utf8()
-                                    .or(keystroke_underlying_dead_key(keysym));
-                                let pre_edit =
-                                    state.pre_edit_text.clone().unwrap_or(String::default());
-                                drop(state);
-                                window.handle_ime_preedit(pre_edit);
-                                state = self.0.borrow_mut();
-                            }
-                            xkbc::Status::Cancelled => {
-                                let pre_edit = state.pre_edit_text.take();
-                                drop(state);
-                                if let Some(pre_edit) = pre_edit {
-                                    window.handle_ime_commit(pre_edit);
-                                }
-                                if let Some(current_key) = keystroke_underlying_dead_key(keysym) {
-                                    window.handle_ime_preedit(current_key);
-                                }
-                                state = self.0.borrow_mut();
-                                compose_state.feed(keysym);
-                            }
-                            _ => {}
-                        }
+                let keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
+                let keystroke = match state.compose_state.take() {
+                    Some(mut compose_state) => {
+                        let pre_edit = state.pre_edit_text.take();
+                        let step = feed_compose(&mut compose_state, keysym, keystroke, pre_edit);
                         state.compose_state = Some(compose_state);
+                        state.pre_edit_text = step.pre_edit;
+                        drop(state);
+                        for text in step.text {
+                            match text {
+                                ComposeText::Mark(text) => window.handle_ime_preedit(text),
+                                ComposeText::Insert(text) => window.handle_ime_commit(text),
+                                ComposeText::Unmark => window.handle_ime_unmark(),
+                                ComposeText::DeleteMarked => window.handle_ime_delete(),
+                            }
+                        }
+                        step.key_down
                     }
-                    keystroke
+                    None => {
+                        drop(state);
+                        Some(keystroke)
+                    }
                 };
-                drop(state);
-                window.handle_native_key_input(
-                    PlatformInput::KeyDown(gpui::KeyDownEvent {
-                        keystroke,
-                        is_held,
-                        prefer_character_input: false,
-                    }),
-                    native,
-                );
+                if let Some(keystroke) = keystroke {
+                    window.handle_native_key_input(
+                        PlatformInput::KeyDown(gpui::KeyDownEvent {
+                            keystroke,
+                            is_held,
+                            prefer_character_input: false,
+                        }),
+                        native,
+                    );
+                }
             }
             Event::KeyRelease(event) => {
                 let window = self.get_window(event.event)?;

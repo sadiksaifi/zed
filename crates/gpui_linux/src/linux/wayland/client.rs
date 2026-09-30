@@ -83,10 +83,11 @@ use super::{
 
 use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
-    SCROLL_LINES, capslock_from_xkb, cursor_style_to_icon_names, get_xkb_compose_state,
-    is_within_click_distance, keystroke_from_xkb, keystroke_underlying_dead_key,
-    modifiers_from_xkb, new_xkb_context, open_uri_internal, read_fd_with_timeout,
-    reveal_path_internal,
+    SCROLL_LINES, capslock_from_xkb,
+    compose::{ComposeText, feed_compose},
+    cursor_style_to_icon_names, get_xkb_compose_state, is_within_click_distance,
+    keystroke_from_xkb, modifiers_from_xkb, new_xkb_context, open_uri_internal,
+    read_fd_with_timeout, reveal_path_internal,
     wayland::{
         clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
         cursor::Cursor,
@@ -1993,56 +1994,35 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let native = native_key_event(keymap_state, keycode);
                 match key_state {
                     wl_keyboard::KeyState::Pressed => {
-                        let mut keystroke =
-                            keystroke_from_xkb(keymap_state, state.modifiers, keycode);
-                        if let Some(mut compose) = state.compose_state.take() {
-                            compose.feed(keysym);
-                            match compose.status() {
-                                xkb::Status::Composing => {
-                                    keystroke.key_char = None;
-                                    state.pre_edit_text =
-                                        compose.utf8().or(keystroke_underlying_dead_key(keysym));
-                                    let pre_edit =
-                                        state.pre_edit_text.clone().unwrap_or(String::default());
-                                    drop(state);
-                                    focused_window.handle_ime(ImeInput::SetMarkedText(pre_edit));
-                                    state = client.borrow_mut();
+                        let keystroke = keystroke_from_xkb(keymap_state, state.modifiers, keycode);
+                        let keystroke = match state.compose_state.take() {
+                            Some(mut compose) => {
+                                let pre_edit = state.pre_edit_text.take();
+                                let step = feed_compose(&mut compose, keysym, keystroke, pre_edit);
+                                state.compose_state = Some(compose);
+                                state.pre_edit_text = step.pre_edit;
+                                drop(state);
+                                for text in step.text {
+                                    focused_window.handle_ime(compose_ime_input(text));
                                 }
-
-                                xkb::Status::Composed => {
-                                    state.pre_edit_text.take();
-                                    keystroke.key_char = compose.utf8();
-                                    if let Some(keysym) = compose.keysym() {
-                                        keystroke.key = xkb::keysym_get_name(keysym);
-                                    }
-                                }
-                                xkb::Status::Cancelled => {
-                                    let pre_edit = state.pre_edit_text.take();
-                                    let new_pre_edit = keystroke_underlying_dead_key(keysym);
-                                    state.pre_edit_text = new_pre_edit.clone();
-                                    drop(state);
-                                    if let Some(pre_edit) = pre_edit {
-                                        focused_window.handle_ime(ImeInput::InsertText(pre_edit));
-                                    }
-                                    if let Some(current_key) = new_pre_edit {
-                                        focused_window
-                                            .handle_ime(ImeInput::SetMarkedText(current_key));
-                                    }
-                                    compose.feed(keysym);
-                                    state = client.borrow_mut();
-                                }
-                                _ => {}
+                                state = client.borrow_mut();
+                                step.key_down
                             }
-                            state.compose_state = Some(compose);
-                        }
+                            None => Some(keystroke),
+                        };
+
+                        state.repeat.current_id += 1;
+                        state.repeat.current_keycode = Some(keycode);
+                        // A key that completes a Compose sequence commits text instead of
+                        // acting as a key, so it does not repeat.
+                        let Some(keystroke) = keystroke else {
+                            return;
+                        };
                         let input = PlatformInput::KeyDown(KeyDownEvent {
                             keystroke: keystroke.clone(),
                             is_held: false,
                             prefer_character_input: false,
                         });
-
-                        state.repeat.current_id += 1;
-                        state.repeat.current_keycode = Some(keycode);
 
                         let rate = state.repeat.characters_per_second;
                         let repeat_interval = Duration::from_secs(1) / rate.max(1);
@@ -2177,6 +2157,15 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
             }
             _ => {}
         }
+    }
+}
+
+fn compose_ime_input(text: ComposeText) -> ImeInput {
+    match text {
+        ComposeText::Mark(text) => ImeInput::SetMarkedText(text),
+        ComposeText::Insert(text) => ImeInput::InsertText(text),
+        ComposeText::Unmark => ImeInput::UnmarkText,
+        ComposeText::DeleteMarked => ImeInput::DeleteText,
     }
 }
 
