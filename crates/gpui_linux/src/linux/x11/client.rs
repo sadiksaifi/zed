@@ -206,6 +206,9 @@ pub struct X11ClientState {
     pub(crate) windows: HashMap<xproto::Window, WindowRef>,
     pub(crate) mouse_focused_window: Option<xproto::Window>,
     pub(crate) keyboard_focused_window: Option<xproto::Window>,
+    /// A window that just gained focus, until the pointer moves or a key is pressed. The next
+    /// button press in it is the click that activated it.
+    activation_click_window: Option<xproto::Window>,
     pub(crate) xkb: xkbc::State,
     keyboard_layout: LinuxKeyboardLayout,
     pub(crate) ximc: Option<X11rbClient<Rc<XCBConnection>>>,
@@ -560,6 +563,7 @@ impl X11Client {
             windows: HashMap::default(),
             mouse_focused_window: None,
             keyboard_focused_window: None,
+            activation_click_window: None,
             xkb: xkb_state,
             keyboard_layout,
             ximc,
@@ -997,6 +1001,14 @@ impl X11Client {
                 let window = self.get_window(event.event)?;
                 window.set_active(true);
                 let mut state = self.0.borrow_mut();
+                // Click-to-focus window managers focus the window before replaying the click
+                // that activated it.
+                if event.mode == xproto::NotifyMode::NORMAL
+                    && event.detail != xproto::NotifyDetail::POINTER
+                    && state.keyboard_focused_window != Some(event.event)
+                {
+                    state.activation_click_window = Some(event.event);
+                }
                 state.keyboard_focused_window = Some(event.event);
                 if let Some(handler) = state.xim_handler.as_mut() {
                     handler.window = event.event;
@@ -1011,6 +1023,7 @@ impl X11Client {
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.keyboard_focused_window = None;
+                state.activation_click_window = None;
                 if let Some(compose_state) = state.compose_state.as_mut() {
                     compose_state.reset();
                 }
@@ -1081,6 +1094,7 @@ impl X11Client {
             Event::KeyPress(event) => {
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
+                state.activation_click_window = None;
 
                 let modifiers = modifiers_from_state(event.state);
                 state.modifiers = modifiers;
@@ -1207,6 +1221,7 @@ impl X11Client {
                         state.last_mouse_button = Some(button);
                         state.last_location = position;
                         let current_count = state.current_count;
+                        let first_mouse = state.activation_click_window.take() == Some(event.event);
 
                         drop(state);
                         window.handle_input(PlatformInput::MouseDown(gpui::MouseDownEvent {
@@ -1214,7 +1229,7 @@ impl X11Client {
                             position,
                             modifiers,
                             click_count: current_count,
-                            first_mouse: false,
+                            first_mouse,
                         }));
                     }
                     Some(ButtonOrScroll::Scroll(direction)) => {
@@ -1304,9 +1319,13 @@ impl X11Client {
                 );
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
+                let pointer_moved = event.valuator_mask[0] & 3 != 0;
+                if pointer_moved {
+                    state.activation_click_window = None;
+                }
                 drop(state);
 
-                if event.valuator_mask[0] & 3 != 0 {
+                if pointer_moved {
                     window.handle_input(PlatformInput::MouseMove(gpui::MouseMoveEvent {
                         position,
                         pressed_button,
