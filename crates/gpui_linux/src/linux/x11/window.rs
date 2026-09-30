@@ -339,8 +339,11 @@ impl SizeLimits {
 }
 
 impl X11WindowState {
+    /// Client decorations draw a transparent shadow gutter and rounded corners around the
+    /// window, so they need a transparent surface even with an opaque background.
     fn is_transparent(&self) -> bool {
-        self.background_appearance != WindowBackgroundAppearance::Opaque
+        self.decorations == WindowDecorations::Client
+            || self.background_appearance != WindowBackgroundAppearance::Opaque
     }
 }
 
