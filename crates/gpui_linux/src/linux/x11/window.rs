@@ -7,8 +7,8 @@ use gpui::{
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, WindowVisibility, popup::PopupNotSupportedError,
-    px,
+    WindowControls, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
+    popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
@@ -290,7 +290,52 @@ pub struct X11WindowState {
     edge_constraints: Option<EdgeConstraints>,
     pub handle: AnyWindowHandle,
     last_insets: [u32; 4],
+    size_limits: SizeLimits,
+    is_minimizable: bool,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
+}
+
+/// The size limits a window asks the window manager to enforce through WM_NORMAL_HINTS.
+struct SizeLimits {
+    is_resizable: bool,
+    min_size: Option<Size<Pixels>>,
+    /// The GPU's maximum texture dimension, which bounds what the renderer can draw.
+    max_texture_size: u32,
+}
+
+impl SizeLimits {
+    /// Returns the hints for a window of `size` device pixels. A window the user cannot resize
+    /// is fixed to that size, so window manager shortcuts cannot maximize or resize it either.
+    fn normal_hints(&self, size: Size<DevicePixels>, scale_factor: f32) -> WmSizeHints {
+        let mut hints = WmSizeHints::new();
+        if self.is_resizable {
+            hints.min_size = self.min_size.map(|min_size| {
+                let min_size = min_size.to_device_pixels(scale_factor);
+                (min_size.width.0, min_size.height.0)
+            });
+            let max_texture_size = self.max_texture_size as i32;
+            hints.max_size = Some((max_texture_size, max_texture_size));
+        } else {
+            let size = (size.width.0.max(1), size.height.0.max(1));
+            hints.min_size = Some(size);
+            hints.max_size = Some(size);
+        }
+        hints
+    }
+
+    fn set_normal_hints(
+        &self,
+        xcb: &XCBConnection,
+        x_window: xproto::Window,
+        size: Size<DevicePixels>,
+        scale_factor: f32,
+    ) -> anyhow::Result<()> {
+        check_reply(
+            || "X11 change of WM_NORMAL_HINTS failed.",
+            self.normal_hints(size, scale_factor)
+                .set_normal_hints(xcb, x_window),
+        )
+    }
 }
 
 impl X11WindowState {
@@ -773,24 +818,12 @@ impl X11WindowState {
 
             renderer.set_subpixel_layout(is_bgr);
 
-            // Set max window size hints based on the GPU's maximum texture dimension.
-            // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size();
-            let mut size_hints = WmSizeHints::new();
-            if let Some(size) = params.window_min_size {
-                size_hints.min_size =
-                    Some((f32::from(size.width) as i32, f32::from(size.height) as i32));
-            }
-            size_hints.max_size = Some((max_texture_size as i32, max_texture_size as i32));
-            check_reply(
-                || {
-                    format!(
-                        "X11 change of WM_SIZE_HINTS failed. max_size: {:?}",
-                        max_texture_size
-                    )
-                },
-                size_hints.set_normal_hints(xcb, x_window),
-            )?;
+            let size_limits = SizeLimits {
+                is_resizable: params.is_resizable,
+                min_size: params.window_min_size,
+                max_texture_size: renderer.max_texture_size(),
+            };
+            size_limits.set_normal_hints(xcb, x_window, bounds.size, scale_factor)?;
 
             if let Some(image) = params.icon {
                 // https://specifications.freedesktop.org/wm-spec/1.4/ar01s05.html#id-1.6.13
@@ -851,6 +884,8 @@ impl X11WindowState {
                 accesskit_adapter: None,
                 counter_id: sync_request_counter,
                 last_sync_counter: None,
+                size_limits,
+                is_minimizable: params.is_minimizable,
             })
         });
 
@@ -1454,6 +1489,15 @@ impl PlatformWindow for X11Window {
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
 
+        // The window manager clamps the new size to the hints, which fix the size of a window
+        // the user cannot resize.
+        if !state.size_limits.is_resizable {
+            state
+                .size_limits
+                .set_normal_hints(&self.0.xcb, self.0.x_window, size, state.scale_factor)
+                .log_err();
+        }
+
         check_reply(
             || {
                 format!(
@@ -1686,6 +1730,9 @@ impl PlatformWindow for X11Window {
 
     fn zoom(&self) {
         let state = self.0.state.borrow();
+        if !state.size_limits.is_resizable {
+            return;
+        }
         self.set_wm_hints(
             || "X11 SendEvent to maximize a window failed.",
             WmHintPropertyState::Toggle,
@@ -1887,6 +1934,15 @@ impl PlatformWindow for X11Window {
         }
     }
 
+    fn window_controls(&self) -> WindowControls {
+        let state = self.0.state.borrow();
+        WindowControls {
+            maximize: state.size_limits.is_resizable,
+            minimize: state.is_minimizable,
+            ..WindowControls::default()
+        }
+    }
+
     fn set_client_inset(&self, inset: Pixels) {
         let mut state = self.0.state.borrow_mut();
 
@@ -2084,5 +2140,48 @@ struct TrivialDeactivationHandler {
 impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
     fn deactivate_accessibility(&mut self) {
         (self.callback)();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SizeLimits;
+    use gpui::{DevicePixels, Size, px, size};
+
+    fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
+        size(DevicePixels(width), DevicePixels(height))
+    }
+
+    #[test]
+    fn resizable_window_hints_scale_the_minimum_size() {
+        let limits = SizeLimits {
+            is_resizable: true,
+            min_size: Some(size(px(300.), px(200.))),
+            max_texture_size: 8192,
+        };
+        let hints = limits.normal_hints(device_size(1600, 1200), 2.0);
+        assert_eq!(hints.min_size, Some((600, 400)));
+        assert_eq!(hints.max_size, Some((8192, 8192)));
+
+        let limits = SizeLimits {
+            min_size: None,
+            ..limits
+        };
+        assert_eq!(
+            limits.normal_hints(device_size(1600, 1200), 2.0).min_size,
+            None
+        );
+    }
+
+    #[test]
+    fn non_resizable_window_hints_fix_the_size() {
+        let limits = SizeLimits {
+            is_resizable: false,
+            min_size: Some(size(px(300.), px(200.))),
+            max_texture_size: 8192,
+        };
+        let hints = limits.normal_hints(device_size(1400, 900), 2.0);
+        assert_eq!(hints.min_size, Some((1400, 900)));
+        assert_eq!(hints.max_size, Some((1400, 900)));
     }
 }

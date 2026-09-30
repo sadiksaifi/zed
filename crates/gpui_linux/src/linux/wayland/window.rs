@@ -134,6 +134,11 @@ pub struct WaylandWindowState {
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
+    is_resizable: bool,
+    is_minimizable: bool,
+    min_size: Option<Size<Pixels>>,
+    /// The last `(min, max)` toplevel size limits sent to the compositor.
+    size_limits: Option<(Size<i32>, Size<i32>)>,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
 }
 
@@ -274,10 +279,6 @@ impl WaylandSurfaceState {
         } else {
             None
         };
-
-        if let Some(size) = params.window_min_size {
-            toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
-        }
 
         // Attempt to set up window decorations based on the requested configuration
         let decoration = globals
@@ -589,16 +590,9 @@ impl WaylandWindowState {
             if let Some(app_id) = options.app_id.as_ref() {
                 xdg_state.toplevel.set_app_id(app_id.clone());
             }
-
-            // Set max window size based on the GPU's maximum texture dimension.
-            // This prevents the window from being resized larger than what the GPU can render.
-            let max_texture_size = renderer.max_texture_size() as i32;
-            xdg_state
-                .toplevel
-                .set_max_size(max_texture_size, max_texture_size);
         }
 
-        Ok(Self {
+        let mut this = Self {
             surface_state,
             parent,
             children: FxHashMap::default(),
@@ -633,8 +627,44 @@ impl WaylandWindowState {
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
+            is_resizable: options.is_resizable,
+            is_minimizable: options.is_minimizable,
+            min_size: options.window_min_size,
+            size_limits: None,
             accesskit_adapter: None,
-        })
+        };
+        this.update_size_limits();
+        Ok(this)
+    }
+
+    /// Sends the toplevel's size limits in window geometry coordinates.
+    ///
+    /// A resizable window is limited by its minimum size and by the GPU's maximum texture
+    /// dimension, which bounds what the renderer can draw. A window the user cannot resize is
+    /// fixed to its current window geometry, so compositor shortcuts cannot maximize or resize
+    /// it either.
+    fn update_size_limits(&mut self) {
+        let Some(toplevel) = self.surface_state.toplevel() else {
+            return;
+        };
+        let geometry = inset_by_tiling(
+            self.bounds.map_origin(|_| px(0.0)),
+            self.inset(),
+            self.tiling,
+        );
+        let size_limits = toplevel_size_limits(
+            self.is_resizable,
+            self.min_size,
+            self.renderer.max_texture_size(),
+            geometry.size,
+        );
+        if self.size_limits == Some(size_limits) {
+            return;
+        }
+        let (min_size, max_size) = size_limits;
+        toplevel.set_min_size(min_size.width, min_size.height);
+        toplevel.set_max_size(max_size.width, max_size.height);
+        self.size_limits = Some(size_limits);
     }
 
     pub fn is_transparent(&self) -> bool {
@@ -1484,6 +1514,7 @@ impl WaylandWindowStatePtr {
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
             state.renderer.update_drawable_size(device_bounds.size);
+            state.update_size_limits();
             (state.bounds.size, state.scale)
         };
 
@@ -1863,6 +1894,9 @@ impl PlatformWindow for WaylandWindow {
 
     fn zoom(&self) {
         let state = self.borrow();
+        if !state.is_resizable {
+            return;
+        }
         if let Some(toplevel) = state.surface_state.toplevel() {
             if !state.maximized {
                 toplevel.set_maximized();
@@ -2130,7 +2164,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn window_controls(&self) -> WindowControls {
-        self.borrow().window_controls
+        let state = self.borrow();
+        WindowControls {
+            maximize: state.window_controls.maximize && state.is_resizable,
+            minimize: state.window_controls.minimize && state.is_minimizable,
+            ..state.window_controls
+        }
     }
 
     fn set_client_inset(&self, inset: Pixels) {
@@ -2222,6 +2261,9 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 }
 
 fn update_window(mut state: RefMut<WaylandWindowState>) {
+    // Client decorations and their inset change the window geometry the size limits refer to.
+    state.update_size_limits();
+
     let opaque = !state.is_transparent();
 
     state.renderer.update_transparency(!opaque);
@@ -2329,6 +2371,25 @@ fn compute_outer_size(
     })
 }
 
+/// Returns the `(min, max)` toplevel size limits in window geometry coordinates.
+fn toplevel_size_limits(
+    is_resizable: bool,
+    min_size: Option<Size<Pixels>>,
+    max_texture_size: u32,
+    geometry_size: Size<Pixels>,
+) -> (Size<i32>, Size<i32>) {
+    if is_resizable {
+        let min_size = min_size
+            .map(|min_size| min_size.map(|length| f32::from(length) as i32))
+            .unwrap_or_default();
+        let max_texture_size = max_texture_size as i32;
+        (min_size, size(max_texture_size, max_texture_size))
+    } else {
+        let size = geometry_size.map(|length| (f32::from(length) as i32).max(1));
+        (size, size)
+    }
+}
+
 fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) -> Bounds<Pixels> {
     if !tiling.top {
         bounds.origin.y += inset;
@@ -2346,4 +2407,37 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+#[cfg(test)]
+mod size_limits_tests {
+    use super::{inset_by_tiling, toplevel_size_limits};
+    use gpui::{Bounds, Tiling, point, px, size};
+
+    #[test]
+    fn resizable_toplevel_is_limited_by_min_size_and_texture_size() {
+        assert_eq!(
+            toplevel_size_limits(
+                true,
+                Some(size(px(300.), px(200.))),
+                8192,
+                size(px(800.), px(600.))
+            ),
+            (size(300, 200), size(8192, 8192))
+        );
+        assert_eq!(
+            toplevel_size_limits(true, None, 8192, size(px(800.), px(600.))),
+            (size(0, 0), size(8192, 8192))
+        );
+    }
+
+    #[test]
+    fn non_resizable_toplevel_is_fixed_to_its_window_geometry() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(820.), px(620.)));
+        let geometry = inset_by_tiling(bounds, px(10.), Tiling::default());
+        assert_eq!(
+            toplevel_size_limits(false, Some(size(px(300.), px(200.))), 8192, geometry.size),
+            (size(800, 600), size(800, 600))
+        );
+    }
 }
