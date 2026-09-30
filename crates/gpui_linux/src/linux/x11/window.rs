@@ -1459,6 +1459,47 @@ impl X11WindowStatePtr {
         bounds.map(|b| b.scale(scale_factor))
     }
 
+    /// Reports the window's screen bounds to AccessKit, which places the tree's node
+    /// bounds relative to the window origin. Those bounds span the whole X window,
+    /// including any client-side decoration insets, because GPUI lays out from its origin.
+    ///
+    /// ConfigureNotify positions are relative to the parent window, which is the window
+    /// manager's frame once the window is reparented, so the origin in root coordinates
+    /// comes from the X server.
+    fn update_a11y_window_bounds(&self) {
+        let root = {
+            let state = self.state.borrow();
+            if state.accesskit_adapter.is_none() {
+                return;
+            }
+            state.x_root_window
+        };
+        let Some(origin) = get_reply(
+            || "X11 TranslateCoordinates for accessibility bounds failed.",
+            self.xcb.translate_coordinates(self.x_window, root, 0, 0),
+        )
+        .log_err() else {
+            return;
+        };
+
+        let mut state = self.state.borrow_mut();
+        let size = state
+            .bounds
+            .size
+            .map(|length| f32::from(length) * state.scale_factor);
+        let x0 = f64::from(origin.dst_x);
+        let y0 = f64::from(origin.dst_y);
+        let bounds = accesskit::Rect {
+            x0,
+            y0,
+            x1: x0 + f64::from(size.width),
+            y1: y0 + f64::from(size.height),
+        };
+        if let Some(adapter) = state.accesskit_adapter.as_mut() {
+            adapter.set_root_window_bounds(bounds, bounds);
+        }
+    }
+
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
         let (is_resize, content_size, scale_factor) = {
             let mut state = self.state.borrow_mut();
@@ -1486,6 +1527,8 @@ impl X11WindowStatePtr {
             }
             result
         };
+
+        self.update_a11y_window_bounds();
 
         let mut callbacks = self.callbacks.borrow_mut();
         if let Some(ref mut fun) = callbacks.resize {
@@ -2191,6 +2234,7 @@ impl PlatformWindow for X11Window {
             accesskit_unix::Adapter::new(activation_handler, action_handler, deactivation_handler);
 
         self.0.state.borrow_mut().accesskit_adapter = Some(adapter);
+        self.0.update_a11y_window_bounds();
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
@@ -2201,33 +2245,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn a11y_update_window_bounds(&self) {
-        let mut state = self.0.state.borrow_mut();
-        let scale = state.scale_factor;
-        let bounds = state.bounds;
-        let [left, right, top, bottom] = state.last_insets;
-
-        let x = f32::from(bounds.origin.x);
-        let y = f32::from(bounds.origin.y);
-        let width = f32::from(bounds.size.width);
-        let height = f32::from(bounds.size.height);
-
-        let outer = accesskit::Rect {
-            x0: (x * scale) as f64,
-            y0: (y * scale) as f64,
-            x1: ((x + width) * scale) as f64,
-            y1: ((y + height) * scale) as f64,
-        };
-
-        let inner = accesskit::Rect {
-            x0: (x * scale) as f64 + left as f64,
-            y0: (y * scale) as f64 + top as f64,
-            x1: ((x + width) * scale) as f64 - right as f64,
-            y1: ((y + height) * scale) as f64 - bottom as f64,
-        };
-
-        if let Some(adapter) = state.accesskit_adapter.as_mut() {
-            adapter.set_root_window_bounds(outer, inner);
-        }
+        self.0.update_a11y_window_bounds();
     }
 }
 
