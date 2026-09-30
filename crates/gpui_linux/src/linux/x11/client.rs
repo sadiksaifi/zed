@@ -1066,7 +1066,6 @@ impl X11Client {
             Event::XkbStateNotify(event) => {
                 let mut state = self.0.borrow_mut();
                 let old_layout = state.xkb.serialize_layout(STATE_LAYOUT_EFFECTIVE);
-                let new_layout = u32::from(event.group);
                 state.xkb.update_mask(
                     event.base_mods.into(),
                     event.latched_mods.into(),
@@ -1075,21 +1074,24 @@ impl X11Client {
                     event.latched_group as u32,
                     event.locked_group.into(),
                 );
+                let new_layout = state.xkb.serialize_layout(STATE_LAYOUT_EFFECTIVE);
                 let modifiers = modifiers_from_xkb(&state.xkb);
                 let capslock = capslock_from_xkb(&state.xkb);
-                if state.last_modifiers_changed_event == modifiers
-                    && state.last_capslock_changed_event == capslock
-                {
-                    drop(state);
-                } else {
-                    let focused_window_id = state.keyboard_focused_window?;
+                let focused_window_id = state.keyboard_focused_window;
+                let modifiers_changed = state.last_modifiers_changed_event != modifiers
+                    || state.last_capslock_changed_event != capslock;
+                if modifiers_changed && focused_window_id.is_some() {
                     state.modifiers = modifiers;
                     state.last_modifiers_changed_event = modifiers;
                     state.capslock = capslock;
                     state.last_capslock_changed_event = capslock;
-                    drop(state);
+                }
+                drop(state);
 
-                    let focused_window = self.get_window(focused_window_id)?;
+                if modifiers_changed
+                    && let Some(focused_window) =
+                        focused_window_id.and_then(|window_id| self.get_window(window_id))
+                {
                     focused_window.handle_input(PlatformInput::ModifiersChanged(
                         ModifiersChangedEvent {
                             modifiers,
@@ -1098,6 +1100,8 @@ impl X11Client {
                     ));
                 }
 
+                // The group can change while no window has focus, so this does not depend on
+                // a focused window.
                 if new_layout != old_layout {
                     self.handle_keyboard_layout_change();
                 }
@@ -1570,19 +1574,17 @@ impl X11Client {
         Some(())
     }
 
+    /// Rebuilds the keyboard layout from the current keymap and active group and notifies the
+    /// app. A new keymap or group can change key translation while the layout name stays the
+    /// same, so every change is reported.
     fn handle_keyboard_layout_change(&self) {
         let mut state = self.0.borrow_mut();
-        let layout_idx = state.xkb.serialize_layout(STATE_LAYOUT_EFFECTIVE);
-        let keymap = state.xkb.get_keymap();
-        let layout_name = keymap.layout_get_name(layout_idx);
-        if layout_name != state.keyboard_layout.name() {
-            state.keyboard_layout = LinuxKeyboardLayout::from_xkb(&state.xkb);
-            if let Some(mut callback) = state.common.callbacks.keyboard_layout_change.take() {
-                drop(state);
-                callback();
-                state = self.0.borrow_mut();
-                state.common.callbacks.keyboard_layout_change = Some(callback);
-            }
+        state.keyboard_layout = LinuxKeyboardLayout::from_xkb(&state.xkb);
+        if let Some(mut callback) = state.common.callbacks.keyboard_layout_change.take() {
+            drop(state);
+            callback();
+            state = self.0.borrow_mut();
+            state.common.callbacks.keyboard_layout_change = Some(callback);
         }
     }
 }

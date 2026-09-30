@@ -678,28 +678,19 @@ impl WaylandClientStatePtr {
         update_ime_cursor_rectangle(&text_input, &mut state.last_ime_cursor_rectangle, bounds);
     }
 
+    /// Rebuilds the keyboard layout from the current keymap and active group and notifies the
+    /// app. A new keymap or group can change key translation while the layout name stays the
+    /// same, so every change is reported.
     pub fn handle_keyboard_layout_change(&self) {
         let client = self.get_client();
         let mut state = client.borrow_mut();
-        let changed = if let Some(keymap_state) = &state.keymap_state {
-            let layout_idx = keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
-            let keymap = keymap_state.get_keymap();
-            let layout_name = keymap.layout_get_name(layout_idx);
-            let changed = layout_name != state.keyboard_layout.name();
-            if changed {
-                state.keyboard_layout = LinuxKeyboardLayout::from_xkb(keymap_state);
-            }
-            changed
-        } else {
-            let changed = &UNKNOWN_KEYBOARD_LAYOUT_NAME != state.keyboard_layout.name();
-            if changed {
-                state.keyboard_layout = LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME);
-            }
-            changed
+        let Some(keymap_state) = &state.keymap_state else {
+            return;
         };
+        let keyboard_layout = LinuxKeyboardLayout::from_xkb(keymap_state);
+        state.keyboard_layout = keyboard_layout;
 
-        if changed && let Some(mut callback) = state.common.callbacks.keyboard_layout_change.take()
-        {
+        if let Some(mut callback) = state.common.callbacks.keyboard_layout_change.take() {
             drop(state);
             callback();
             state = client.borrow_mut();
@@ -1942,6 +1933,8 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let old_layout =
                     keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
                 keymap_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                let new_layout =
+                    keymap_state.serialize_layout(xkbcommon::xkb::STATE_LAYOUT_EFFECTIVE);
                 state.modifiers = modifiers_from_xkb(keymap_state);
                 let keymap_state = state.keymap_state.as_mut().unwrap();
                 state.capslock = capslock_from_xkb(keymap_state);
@@ -1956,7 +1949,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     focused_window.handle_input(input);
                 }
 
-                if group != old_layout {
+                if new_layout != old_layout {
                     this.handle_keyboard_layout_change();
                 }
             }
