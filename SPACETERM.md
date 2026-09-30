@@ -15,6 +15,35 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui): keep empty content masks empty when snapping`
 - `fix(gpui_macos): report glyph offsets in GPUI coordinates`
 - `test(gpui): record traffic light positions and export the macOS text system with test-support`
+- `feat(gpui): record window management requests on test windows`
+- `feat(gpui): simulate window decorations, controls and button layout in tests`
+- `feat(gpui): activate accessibility on test windows`
+- `feat(gpui): record traffic light positions on every test platform`
+- `fix(gpui): treat GNOME appmenu, icon and spacer as known button layout items`
+- `feat(gpui_linux): perform the desktop's titlebar double-click action`
+- `fix(gpui_linux): honor non-resizable and non-minimizable windows`
+- `fix(gpui_linux): give X11 client-decorated windows a transparent surface`
+- `feat(gpui): report which window backgrounds the platform supports`
+- `fix(gpui_linux): mark the X11 click that activates a window as first_mouse`
+- `fix(gpui_linux): set X11 WM_CLASS from the app ID before mapping`
+- `perf(gpui_linux): stop the X11 refresh timer while a window requests no frames`
+- `feat(gpui_linux): report touchpad scroll phases on Wayland`
+- `feat(gpui): draw a client frame for client-decorated windows in the WGPU renderer`
+- `feat(gpui_linux): report the active layout's shift pairs`
+- `fix(gpui_linux): report every keymap and layout group change`
+- `feat(gpui_linux): report native XKB key facts`
+- `fix(gpui_linux): mark X11 key repeats as held`
+- `fix(gpui_linux): commit composed text through the input handler`
+- `fix(gpui_linux): commit input method text over the pre-edit through the input handler`
+- `feat(gpui_linux): read and write clipboard file lists`
+- `refactor(gpui_linux): carry each Wayland activation request on its token`
+- `feat(gpui_linux): request window attention on Wayland`
+- `feat(gpui): withdraw window attention requests`
+- `feat(gpui): activate windows with activation tokens from other programs`
+- `fix(gpui_linux): report X11 window bounds to AccessKit`
+- `feat(gpui_linux): resolve .SystemUIFont through fontconfig`
+- `fix(gpui_linux): serve the UTF-8 text targets that the X11 clipboard advertises`
+- `fix(gpui_linux): build the titlebar action only with a display backend`
 
 ## Monthly rebase
 
@@ -53,6 +82,20 @@ PATH="/opt/homebrew/opt/llvm@21/bin:$PATH" cargo clippy -p gpui_windows --target
 ```
 
 The `gpui` build script needs `llvm-rc` from LLVM 21 for the Windows check.
+
+Linux check, with the Wayland and X11 development libraries installed:
+
+```sh
+cargo check -p gpui_platform --features wayland,x11,font-kit
+cargo test -p gpui --lib --features test-support
+cargo test -p gpui_linux --features wayland,x11
+cargo clippy -p gpui -p gpui_linux -p gpui_wgpu -p gpui_platform --all-targets --features gpui/test-support,gpui_linux/wayland,gpui_linux/x11 -- -D warnings
+cargo clippy -p gpui_linux --no-default-features --features wayland -- -D warnings
+cargo clippy -p gpui_linux --no-default-features -- -D warnings
+```
+
+The `gpui_wgpu` headless renderer tests need a GPU adapter. Without a GPU, Mesa lavapipe provides a
+software Vulkan adapter.
 
 Wasm check, matching `.github/workflows/run_tests.yml`:
 
