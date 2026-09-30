@@ -10013,6 +10013,80 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn test_window_management_requests_are_recorded(cx: &mut TestAppContext) {
+        use crate::{ResizeEdge, TestWindowRequest};
+
+        let handle = cx.add_window(|_, _| EmptyView);
+        let menu_position = point(px(4.), px(8.));
+        cx.update_window(handle.into(), |_, window, _| {
+            window.minimize_window();
+            window.zoom_window();
+            assert!(window.is_maximized());
+            window.zoom_window();
+            assert!(!window.is_maximized());
+            window.start_window_move();
+            window.start_window_resize(ResizeEdge::BottomRight);
+            window.show_window_menu(menu_position);
+            window.titlebar_double_click();
+        })
+        .unwrap();
+
+        assert_eq!(
+            cx.window_requests(handle.into()),
+            vec![
+                TestWindowRequest::Minimize,
+                TestWindowRequest::Zoom,
+                TestWindowRequest::Zoom,
+                TestWindowRequest::StartWindowMove,
+                TestWindowRequest::StartWindowResize(ResizeEdge::BottomRight),
+                TestWindowRequest::ShowWindowMenu(menu_position),
+                TestWindowRequest::TitlebarDoubleClick {
+                    is_resizable: true,
+                    is_minimizable: true,
+                },
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_window_management_requests_respect_window_capabilities(cx: &mut TestAppContext) {
+        use crate::{ResizeEdge, TestWindowRequest, WindowBounds};
+
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.)));
+        let handle = cx
+            .update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Maximized(bounds)),
+                        is_resizable: false,
+                        is_minimizable: false,
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| EmptyView),
+                )
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, _| {
+            assert!(window.is_maximized());
+            assert_eq!(window.window_bounds(), WindowBounds::Maximized(bounds));
+            window.start_window_resize(ResizeEdge::Left);
+            window.titlebar_double_click();
+        })
+        .unwrap();
+
+        assert_eq!(
+            cx.window_requests(handle.into()),
+            vec![
+                TestWindowRequest::Zoom,
+                TestWindowRequest::TitlebarDoubleClick {
+                    is_resizable: false,
+                    is_minimizable: false,
+                },
+            ]
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn test_traffic_light_position_updates(cx: &mut TestAppContext) {

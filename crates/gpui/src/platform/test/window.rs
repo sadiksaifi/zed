@@ -1,9 +1,10 @@
 use crate::{
     AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size, TestPlatform,
-    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowInsets, WindowParams, WindowVisibility,
+    PlatformWindow, Point, PromptButton, RequestFrameOptions, ResizeEdge, Scene, Size,
+    TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
+    WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
@@ -16,6 +17,32 @@ use std::{
     rc::{Rc, Weak},
     sync::{self, Arc},
 };
+
+/// A window-management request that the application made of a test window.
+///
+/// Test windows record these requests instead of acting on them, so tests can
+/// assert what the application asked the platform to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TestWindowRequest {
+    /// [`crate::Window::minimize_window`] was called.
+    Minimize,
+    /// [`crate::Window::zoom_window`] was called, or the window opened maximized.
+    Zoom,
+    /// [`crate::Window::start_window_move`] was called.
+    StartWindowMove,
+    /// [`crate::Window::start_window_resize`] was called on a resizable window.
+    StartWindowResize(ResizeEdge),
+    /// [`crate::Window::show_window_menu`] was called at this position.
+    ShowWindowMenu(Point<Pixels>),
+    /// [`crate::Window::titlebar_double_click`] was called on a window with
+    /// these capabilities.
+    TitlebarDoubleClick {
+        /// Whether the window is resizable.
+        is_resizable: bool,
+        /// Whether the window is minimizable.
+        is_minimizable: bool,
+    },
+}
 
 pub(crate) struct TestWindowState {
     pub(crate) bounds: Bounds<Pixels>,
@@ -53,6 +80,8 @@ pub(crate) struct TestWindowState {
     text_input_state_changes: Vec<TextInputStateChange>,
     #[cfg(target_os = "macos")]
     traffic_light_position_updates: Vec<Point<Pixels>>,
+    requests: Vec<TestWindowRequest>,
+    is_maximized: bool,
     is_fullscreen: bool,
     scale_factor: f32,
     appearance: WindowAppearance,
@@ -128,6 +157,8 @@ impl TestWindow {
             text_input_state_changes: Vec::new(),
             #[cfg(target_os = "macos")]
             traffic_light_position_updates: Vec::new(),
+            requests: Vec::new(),
+            is_maximized: false,
             is_fullscreen: false,
             // Preserve the test platform's historical 2x default.
             scale_factor: 2.0,
@@ -215,6 +246,15 @@ impl TestWindow {
     #[cfg(target_os = "macos")]
     pub fn traffic_light_position_updates(&self) -> Vec<Point<Pixels>> {
         self.0.lock().traffic_light_position_updates.clone()
+    }
+
+    /// Every [`TestWindowRequest`] made of this window, oldest first.
+    pub fn requests(&self) -> Vec<TestWindowRequest> {
+        self.0.lock().requests.clone()
+    }
+
+    fn record_request(&self, request: TestWindowRequest) {
+        self.0.lock().requests.push(request);
     }
 
     pub fn simulate_resize(&mut self, size: Size<Pixels>) {
@@ -336,11 +376,16 @@ impl PlatformWindow for TestWindow {
     }
 
     fn window_bounds(&self) -> WindowBounds {
-        WindowBounds::Windowed(self.bounds())
+        let state = self.0.lock();
+        if state.is_maximized {
+            WindowBounds::Maximized(state.bounds)
+        } else {
+            WindowBounds::Windowed(state.bounds)
+        }
     }
 
     fn is_maximized(&self) -> bool {
-        false
+        self.0.lock().is_maximized
     }
 
     fn content_size(&self) -> Size<Pixels> {
@@ -459,11 +504,20 @@ impl PlatformWindow for TestWindow {
     }
 
     fn minimize(&self) {
-        unimplemented!()
+        self.record_request(TestWindowRequest::Minimize);
     }
 
     fn zoom(&self) {
-        unimplemented!()
+        let mut state = self.0.lock();
+        state.is_maximized = !state.is_maximized;
+        state.requests.push(TestWindowRequest::Zoom);
+    }
+
+    fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
+        self.record_request(TestWindowRequest::TitlebarDoubleClick {
+            is_resizable,
+            is_minimizable,
+        });
     }
 
     fn toggle_fullscreen(&self) {
@@ -575,12 +629,16 @@ impl PlatformWindow for TestWindow {
         unimplemented!()
     }
 
-    fn show_window_menu(&self, _position: Point<Pixels>) {
-        unimplemented!()
+    fn show_window_menu(&self, position: Point<Pixels>) {
+        self.record_request(TestWindowRequest::ShowWindowMenu(position));
     }
 
     fn start_window_move(&self) {
-        unimplemented!()
+        self.record_request(TestWindowRequest::StartWindowMove);
+    }
+
+    fn start_window_resize(&self, edge: ResizeEdge) {
+        self.record_request(TestWindowRequest::StartWindowResize(edge));
     }
 
     fn can_start_external_drag(&self) -> bool {

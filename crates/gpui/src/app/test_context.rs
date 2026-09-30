@@ -5,8 +5,9 @@ use crate::{
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
     SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
+    TestScreenCaptureSource, TestWindow, TestWindowRequest, TextSystem, VisualContext, Window,
+    WindowBounds, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
+    window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -502,6 +503,11 @@ impl TestAppContext {
             .traffic_light_position_updates()
     }
 
+    /// Returns every window-management request the window received, oldest first.
+    pub fn window_requests(&self, window_handle: AnyWindowHandle) -> Vec<TestWindowRequest> {
+        self.test_window(window_handle).requests()
+    }
+
     /// Returns true if there's an alert dialog open.
     pub fn expect_restart(&self) -> oneshot::Receiver<(Option<PathBuf>, Vec<std::ffi::OsString>)> {
         let (tx, rx) = futures::channel::oneshot::channel();
@@ -991,6 +997,11 @@ impl VisualTestContext {
     /// Simulates the window moving to a display with a different scale factor.
     pub fn simulate_scale_factor_change(&self, scale_factor: f32) {
         self.simulate_window_scale_factor_change(self.window, scale_factor)
+    }
+
+    /// Returns every window-management request this window received, oldest first.
+    pub fn window_requests(&self) -> Vec<TestWindowRequest> {
+        self.cx.window_requests(self.window)
     }
 
     /// debug_bounds returns the bounds of the element with the given selector.

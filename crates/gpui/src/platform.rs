@@ -123,7 +123,9 @@ impl WindowVisibility {
 pub(crate) use test::*;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use test::{TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream};
+pub use test::{
+    TestDispatcher, TestScreenCaptureSource, TestScreenCaptureStream, TestWindowRequest,
+};
 
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
 pub use threaded_dispatcher::ThreadedDispatcher;
