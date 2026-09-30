@@ -30,7 +30,9 @@ use gpui_util::{ResultExt as _, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
-use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver, TitlebarDoubleClickAction};
+#[cfg(any(feature = "wayland", feature = "x11"))]
+use crate::linux::TitlebarDoubleClickAction;
+use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
     DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
@@ -144,6 +146,7 @@ pub(crate) struct LinuxCommon {
     pub(crate) appearance: WindowAppearance,
     pub(crate) auto_hide_scrollbars: bool,
     pub(crate) button_layout: WindowButtonLayout,
+    #[cfg(any(feature = "wayland", feature = "x11"))]
     pub(crate) titlebar_double_click_action: TitlebarDoubleClickAction,
     pub(crate) callbacks: PlatformHandlers,
     pub(crate) signal: LoopSignal,
@@ -189,6 +192,7 @@ impl LinuxCommon {
             appearance: WindowAppearance::Light,
             auto_hide_scrollbars: false,
             button_layout: WindowButtonLayout::linux_default(),
+            #[cfg(any(feature = "wayland", feature = "x11"))]
             titlebar_double_click_action: TitlebarDoubleClickAction::default(),
             callbacks,
             signal,
