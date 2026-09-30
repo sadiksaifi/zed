@@ -1,13 +1,13 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
-    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
-    Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
+    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, Decorations, DrawPhase,
+    Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
     SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TestWindowRequest, TextSystem, VisualContext, Window,
-    WindowBounds, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
-    window::ElementArenaScope,
+    WindowBounds, WindowButtonLayout, WindowControls, WindowHandle, WindowOptions,
+    WindowVisibility, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -501,6 +501,36 @@ impl TestAppContext {
     ) -> Vec<Point<Pixels>> {
         self.test_window(window_handle)
             .traffic_light_position_updates()
+    }
+
+    /// Simulates the platform configuring the window's decorations, then runs
+    /// until parked so the window's appearance observers have run.
+    pub fn simulate_window_decorations(
+        &self,
+        window_handle: AnyWindowHandle,
+        decorations: Decorations,
+    ) {
+        self.test_window(window_handle)
+            .simulate_decorations(decorations);
+        self.run_until_parked();
+    }
+
+    /// Simulates the platform changing which window controls it supports, then
+    /// runs until parked so the window's appearance observers have run.
+    pub fn simulate_window_controls(
+        &self,
+        window_handle: AnyWindowHandle,
+        window_controls: WindowControls,
+    ) {
+        self.test_window(window_handle)
+            .simulate_window_controls(window_controls);
+        self.run_until_parked();
+    }
+
+    /// Simulates the desktop changing its window button layout, which
+    /// [`App::button_layout`] then reports, and notifies every open window.
+    pub fn simulate_button_layout(&self, layout: Option<WindowButtonLayout>) {
+        self.test_platform.simulate_button_layout(layout);
     }
 
     /// Returns every window-management request the window received, oldest first.
@@ -997,6 +1027,20 @@ impl VisualTestContext {
     /// Simulates the window moving to a display with a different scale factor.
     pub fn simulate_scale_factor_change(&self, scale_factor: f32) {
         self.simulate_window_scale_factor_change(self.window, scale_factor)
+    }
+
+    /// Simulates the platform configuring this window's decorations, then runs
+    /// until parked.
+    pub fn simulate_decorations(&self, decorations: Decorations) {
+        self.cx
+            .simulate_window_decorations(self.window, decorations);
+    }
+
+    /// Simulates the platform changing which window controls it supports, then
+    /// runs until parked.
+    pub fn simulate_window_controls(&self, window_controls: WindowControls) {
+        self.cx
+            .simulate_window_controls(self.window, window_controls);
     }
 
     /// Returns every window-management request this window received, oldest first.

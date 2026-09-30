@@ -8,7 +8,7 @@ use crate::{
     PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString,
     SourceMetadata, SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow,
-    ThermalState, WindowAppearance, WindowParams, size,
+    ThermalState, WindowAppearance, WindowButtonLayout, WindowParams, size,
 };
 use anyhow::Result;
 #[cfg(any(test, feature = "test-support"))]
@@ -54,6 +54,9 @@ pub(crate) struct TestPlatform {
         Option<Box<dyn Fn() -> anyhow::Result<Option<Box<dyn PlatformHeadlessRenderer>>>>>,
     weak: Weak<Self>,
     menus: RefCell<Vec<OwnedMenu>>,
+    button_layout: Cell<Option<WindowButtonLayout>>,
+    #[cfg(any(test, feature = "test-support"))]
+    windows: RefCell<Vec<Weak<Mutex<crate::TestWindowState>>>>,
 }
 
 #[derive(Clone)]
@@ -172,6 +175,9 @@ impl TestPlatform {
             text_system,
             headless_renderer_factory,
             menus: Default::default(),
+            button_layout: Cell::new(None),
+            #[cfg(any(test, feature = "test-support"))]
+            windows: Default::default(),
         })
     }
 
@@ -290,6 +296,24 @@ impl TestPlatform {
         _answers: &[PromptButton],
     ) -> oneshot::Receiver<usize> {
         oneshot::channel().1
+    }
+
+    /// Replaces the window button layout and notifies every open window, as
+    /// the Linux platforms do when the desktop setting changes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn simulate_button_layout(&self, layout: Option<WindowButtonLayout>) {
+        self.button_layout.set(layout);
+        let windows = {
+            let mut windows = self.windows.borrow_mut();
+            windows.retain(|window| window.strong_count() > 0);
+            windows
+                .iter()
+                .filter_map(|window| window.upgrade().map(TestWindow))
+                .collect::<Vec<_>>()
+        };
+        for window in windows {
+            window.notify_button_layout_changed();
+        }
     }
 
     pub(crate) fn set_active_window(&self, window: Option<TestWindow>) {
@@ -506,11 +530,17 @@ impl Platform for TestPlatform {
             self.active_display.clone(),
             renderer,
         );
+        #[cfg(any(test, feature = "test-support"))]
+        self.windows.borrow_mut().push(Rc::downgrade(&window.0));
         Ok(Box::new(window))
     }
 
     fn window_appearance(&self) -> WindowAppearance {
         WindowAppearance::Light
+    }
+
+    fn button_layout(&self) -> Option<WindowButtonLayout> {
+        self.button_layout.get()
     }
 
     fn open_url(&self, url: &str) {

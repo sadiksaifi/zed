@@ -1,10 +1,10 @@
 use crate::{
-    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, RequestFrameOptions, ResizeEdge, Scene, Size,
-    TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
-    WindowVisibility,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, GpuSpecs,
+    HeadlessAtlas, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, ResizeEdge,
+    Scene, Size, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowInsets,
+    WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
@@ -71,6 +71,7 @@ pub(crate) struct TestWindowState {
     virtual_keyboard_dismissals: usize,
     moved_callback: Option<Box<dyn FnMut()>>,
     appearance_change_callback: Option<Box<dyn FnMut()>>,
+    button_layout_change_callback: Option<Box<dyn FnMut()>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     frame_wake_count: Rc<Cell<usize>>,
     frame_scheduled: bool,
@@ -81,6 +82,8 @@ pub(crate) struct TestWindowState {
     #[cfg(target_os = "macos")]
     traffic_light_position_updates: Vec<Point<Pixels>>,
     requests: Vec<TestWindowRequest>,
+    decorations: Decorations,
+    window_controls: WindowControls,
     is_maximized: bool,
     is_fullscreen: bool,
     scale_factor: f32,
@@ -148,6 +151,7 @@ impl TestWindow {
             virtual_keyboard_dismissals: 0,
             moved_callback: None,
             appearance_change_callback: None,
+            button_layout_change_callback: None,
             request_frame_callback: None,
             frame_wake_count: Rc::new(Cell::new(0)),
             frame_scheduled: false,
@@ -158,6 +162,8 @@ impl TestWindow {
             #[cfg(target_os = "macos")]
             traffic_light_position_updates: Vec::new(),
             requests: Vec::new(),
+            decorations: Decorations::Server,
+            window_controls: WindowControls::default(),
             is_maximized: false,
             is_fullscreen: false,
             // Preserve the test platform's historical 2x default.
@@ -291,14 +297,39 @@ impl TestWindow {
     }
 
     pub fn simulate_appearance_change(&self, appearance: WindowAppearance) {
-        let mut lock = self.0.lock();
-        lock.appearance = appearance;
-        let Some(mut callback) = lock.appearance_change_callback.take() else {
+        self.0.lock().appearance = appearance;
+        self.notify_appearance_changed();
+    }
+
+    /// Simulates the platform configuring this window's decorations. Like the
+    /// Linux platforms, this notifies the window's appearance observers.
+    pub fn simulate_decorations(&self, decorations: Decorations) {
+        self.0.lock().decorations = decorations;
+        self.notify_appearance_changed();
+    }
+
+    /// Simulates the platform changing which window controls it supports. Like
+    /// the Linux platforms, this notifies the window's appearance observers.
+    pub fn simulate_window_controls(&self, window_controls: WindowControls) {
+        self.0.lock().window_controls = window_controls;
+        self.notify_appearance_changed();
+    }
+
+    fn notify_appearance_changed(&self) {
+        let Some(mut callback) = self.0.lock().appearance_change_callback.take() else {
             return;
         };
-        drop(lock);
         callback();
         self.0.lock().appearance_change_callback = Some(callback);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn notify_button_layout_changed(&self) {
+        let Some(mut callback) = self.0.lock().button_layout_change_callback.take() else {
+            return;
+        };
+        callback();
+        self.0.lock().button_layout_change_callback = Some(callback);
     }
 
     /// Returns how many times this window's frame waker has been invoked.
@@ -592,6 +623,10 @@ impl PlatformWindow for TestWindow {
         self.0.lock().appearance_change_callback = Some(callback);
     }
 
+    fn on_button_layout_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().button_layout_change_callback = Some(callback);
+    }
+
     fn draw(&self, scene: &Scene) {
         let scale_factor = self.scale_factor();
         let mut state = self.0.lock();
@@ -653,6 +688,14 @@ impl PlatformWindow for TestWindow {
             }
         }
         state.start_external_drag_result
+    }
+
+    fn window_decorations(&self) -> Decorations {
+        self.0.lock().decorations
+    }
+
+    fn window_controls(&self) -> WindowControls {
+        self.0.lock().window_controls
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}

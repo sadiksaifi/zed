@@ -10087,6 +10087,81 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn test_simulated_decorations_and_window_controls(cx: &mut TestAppContext) {
+        use crate::{Decorations, Tiling, WindowControls};
+
+        let handle = cx.add_window(|_, _| EmptyView);
+        let appearance_changes = Rc::new(Cell::new(0));
+        let _subscription = cx
+            .update_window(handle.into(), |_, window, _| {
+                assert_eq!(window.window_decorations(), Decorations::Server);
+                assert_eq!(window.window_controls(), WindowControls::default());
+                let appearance_changes = appearance_changes.clone();
+                window.observe_window_appearance(move |_, _| {
+                    appearance_changes.set(appearance_changes.get() + 1)
+                })
+            })
+            .unwrap();
+
+        let decorations = Decorations::Client {
+            tiling: Tiling {
+                left: true,
+                ..Tiling::default()
+            },
+        };
+        let window_controls = WindowControls {
+            fullscreen: false,
+            maximize: false,
+            minimize: true,
+            window_menu: true,
+        };
+        cx.simulate_window_decorations(handle.into(), decorations);
+        cx.simulate_window_controls(handle.into(), window_controls);
+
+        cx.update_window(handle.into(), |_, window, _| {
+            assert_eq!(window.window_decorations(), decorations);
+            assert_eq!(window.window_controls(), window_controls);
+        })
+        .unwrap();
+        assert_eq!(appearance_changes.get(), 2);
+    }
+
+    #[gpui::test]
+    fn test_simulated_button_layout_notifies_every_window(cx: &mut TestAppContext) {
+        use crate::{MAX_BUTTONS_PER_SIDE, WindowButton, WindowButtonLayout};
+
+        assert_eq!(cx.update(|cx| cx.button_layout()), None);
+        let windows: [AnyWindowHandle; 2] = [
+            cx.add_window(|_, _| EmptyView).into(),
+            cx.add_window(|_, _| EmptyView).into(),
+        ];
+        let notifications = Rc::new(RefCell::new(Vec::new()));
+        let _subscriptions = windows.map(|handle| {
+            cx.update_window(handle, |_, window, _| {
+                let notifications = notifications.clone();
+                window.observe_button_layout_changed(move |_, cx| {
+                    notifications
+                        .borrow_mut()
+                        .push((handle, cx.button_layout()))
+                })
+            })
+            .unwrap()
+        });
+
+        let layout = WindowButtonLayout {
+            left: [None; MAX_BUTTONS_PER_SIDE],
+            right: [Some(WindowButton::Close), None, None],
+        };
+        cx.simulate_button_layout(Some(layout));
+
+        assert_eq!(cx.update(|cx| cx.button_layout()), Some(layout));
+        assert_eq!(
+            *notifications.borrow(),
+            vec![(windows[0], Some(layout)), (windows[1], Some(layout))]
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn test_traffic_light_position_updates(cx: &mut TestAppContext) {
