@@ -1,4 +1,5 @@
 use crate::wgpu_backdrop::BackdropRenderer;
+use crate::wgpu_client_frame::ClientFrameRenderer;
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -155,6 +156,7 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
+    client_frame_shadows: InstanceBinding,
 }
 
 struct WgpuBindGroupLayouts {
@@ -196,6 +198,7 @@ struct WgpuResources {
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
     backdrop: BackdropRenderer,
+    client_frame: ClientFrameRenderer,
 }
 
 struct CachedTextureBindGroup {
@@ -1332,6 +1335,7 @@ impl WgpuRendererCore {
         });
         let max_texture_size = device.limits().max_texture_dimension_2d;
         let backdrop = BackdropRenderer::new(&device, target_format);
+        let client_frame = ClientFrameRenderer::new(&device, target_format);
 
         Self {
             resources: WgpuResources {
@@ -1350,6 +1354,7 @@ impl WgpuRendererCore {
                 path_msaa_texture: None,
                 path_msaa_view: None,
                 backdrop,
+                client_frame,
             },
             atlas,
             path_globals_offset,
@@ -1503,6 +1508,11 @@ impl WgpuRendererCore {
         resources
             .backdrop
             .prepare(&resources.device, &resources.queue, scene, target);
+        if let Some(client_frame) = &scene.client_frame {
+            resources
+                .client_frame
+                .prepare(&resources.queue, client_frame);
+        }
         let frame_view = &target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder =
@@ -1647,6 +1657,16 @@ impl WgpuRendererCore {
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
+
+            if let Some(client_frame) = &scene.client_frame {
+                self.resources().client_frame.draw_mask(&mut pass);
+                self.draw_instances(
+                    &instance_bindings.client_frame_shadows,
+                    &self.resources().pipelines.shadows,
+                    instance_range(0..client_frame.shadows.len()),
+                    &mut pass,
+                );
+            }
         }
 
         let submission = self
@@ -1691,6 +1711,14 @@ impl WgpuRendererCore {
                 "polychrome_sprites_bind_group",
                 instance_offset,
                 &scene.polychrome_sprites,
+            )?,
+            client_frame_shadows: self.write_instance_binding(
+                "client_frame_shadows_bind_group",
+                instance_offset,
+                scene
+                    .client_frame
+                    .as_ref()
+                    .map_or(&[][..], |frame| frame.shadows.as_slice()),
             )?,
         })
     }
@@ -2717,6 +2745,8 @@ mod tests {
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     #[cfg(not(target_family = "wasm"))]
     const BLACK: [u8; 4] = [0, 0, 0, 255];
+    #[cfg(not(target_family = "wasm"))]
+    const TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
 
     #[cfg(not(target_family = "wasm"))]
     #[test]
@@ -2857,6 +2887,63 @@ mod tests {
             assert_pixel(&image, 44, 24, BLUE);
             assert_pixel(&image, 36, 36, [0, 128, 0, 255]);
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    fn client_frame(tiling: gpui::Tiling) -> Option<gpui::ScaledClientFrame> {
+        let frame = gpui::ClientFrame {
+            inset: gpui::px(8.0),
+            corner_radius: gpui::px(8.0),
+            tiling,
+            shadows: smallvec::smallvec![
+                gpui::BoxShadow::new(gpui::px(0.0), gpui::px(0.0), gpui::blue())
+                    .spread_radius(gpui::px(4.0)),
+            ],
+        };
+        gpui::ScaledClientFrame::new(&frame, gpui::size(gpui::px(64.0), gpui::px(64.0)), 1.0)
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn headless_renderer_client_frame_clears_outside_the_shape_and_draws_shadows()
+    -> anyhow::Result<()> {
+        let (_guard, mut renderer) = serial_headless_renderer()?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(0.0, 0.0, 64.0, 64.0, gpui::red()));
+        scene.finish();
+        scene.client_frame = client_frame(gpui::Tiling::default());
+
+        let image = renderer.render_scene_to_image(&scene, device_size(64, 64))?;
+        assert_pixel(&image, 32, 32, RED);
+        assert_pixel(&image, 8, 32, RED);
+        assert_pixel(&image, 5, 32, BLUE);
+        assert_pixel(&image, 1, 32, TRANSPARENT);
+        assert_pixel(&image, 62, 62, TRANSPARENT);
+        // Outside the rounded corner, where the shadow's own rounded rectangle reaches.
+        assert_pixel(&image, 8, 8, BLUE);
+        Ok(())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn headless_renderer_client_frame_keeps_tiled_edges() -> anyhow::Result<()> {
+        let (_guard, mut renderer) = serial_headless_renderer()?;
+        let mut scene = Scene::default();
+        scene.insert_primitive(solid_quad(0.0, 0.0, 64.0, 64.0, gpui::red()));
+        scene.finish();
+        scene.client_frame = client_frame(gpui::Tiling {
+            left: true,
+            top: true,
+            ..Default::default()
+        });
+
+        let image = renderer.render_scene_to_image(&scene, device_size(64, 64))?;
+        assert_pixel(&image, 0, 0, RED);
+        assert_pixel(&image, 0, 32, RED);
+        assert_pixel(&image, 32, 0, RED);
+        assert_pixel(&image, 58, 32, BLUE);
+        assert_pixel(&image, 62, 62, TRANSPARENT);
         Ok(())
     }
 

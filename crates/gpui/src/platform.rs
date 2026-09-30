@@ -36,7 +36,7 @@ pub(crate) type PlatformScreenCaptureFrame =
     objc2_core_foundation::CFRetained<objc2_core_video::CVImageBuffer>;
 
 use crate::{
-    Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds,
+    Action, AnyWindowHandle, App, AsyncWindowContext, BackgroundExecutor, Bounds, BoxShadow,
     DEFAULT_WINDOW_SIZE, DevicePixels, DispatchEventResult, Edges, ExternalDragPayload, Font,
     FontId, FontMetrics, FontRun, ForegroundExecutor, GlyphId, GpuSpecs, Hsla, ImageSource, Keymap,
     LineLayout, MissingGlyphSink, Pixels, PlatformGestures, PlatformInput, Point, Priority,
@@ -800,6 +800,25 @@ impl Tiling {
     pub fn is_tiled(&self) -> bool {
         self.top || self.left || self.right || self.bottom
     }
+}
+
+/// The frame a renderer draws around a client-decorated window, set with
+/// [`Window::set_client_frame`].
+///
+/// The window's shape is its bounds inset by `inset` on every untiled edge. After drawing a
+/// frame, the renderer clears the pixels outside the shape and draws `shadows` there. A corner
+/// is rounded only when both of its edges are untiled.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClientFrame {
+    /// The width of the area outside the shape on untiled edges, usually the value passed to
+    /// [`Window::set_client_inset`].
+    pub inset: Pixels,
+    /// The radius of the shape's rounded corners.
+    pub corner_radius: Pixels,
+    /// The window's tiled edges.
+    pub tiling: Tiling,
+    /// Drop shadows drawn outside the shape. Inset shadows are ignored.
+    pub shadows: SmallVec<[BoxShadow; 2]>,
 }
 
 /// Callbacks for the accessibility adapter.

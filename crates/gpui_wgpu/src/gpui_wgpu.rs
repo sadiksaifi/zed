@@ -1,6 +1,7 @@
 mod cosmic_text_system;
 mod wgpu_atlas;
 mod wgpu_backdrop;
+mod wgpu_client_frame;
 mod wgpu_context;
 mod wgpu_renderer;
 

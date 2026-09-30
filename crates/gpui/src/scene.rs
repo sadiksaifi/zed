@@ -5,8 +5,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, DevicePixels, Edges, Hsla,
-    Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ClientFrame, ContentMask, Corners, DevicePixels,
+    Edges, Hsla, Pixels, Point, Radians, Rgba, ScaledPixels, Size, bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -55,6 +55,8 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Applied by the renderer after every primitive. See [`ClientFrame`].
+    pub client_frame: Option<ScaledClientFrame>,
 }
 
 #[expect(missing_docs)]
@@ -74,6 +76,7 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.client_frame = None;
     }
 
     pub fn len(&self) -> usize {
@@ -963,6 +966,103 @@ impl From<Shadow> for Primitive {
     }
 }
 
+/// A [`ClientFrame`] in the device pixels of a frame.
+///
+/// Renderers apply it after every primitive: they multiply the target by the coverage of the
+/// rounded `bounds`, clearing the pixels outside the window's shape, and then draw `shadows`.
+#[derive(Clone, Debug)]
+pub struct ScaledClientFrame {
+    /// The window's shape.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Rounds the shape. Corners with a tiled edge are square.
+    pub corner_radii: Corners<ScaledPixels>,
+    /// Drop shadows clipped out of the shape.
+    pub shadows: Vec<Shadow>,
+}
+
+impl ScaledClientFrame {
+    /// Scales `frame` for a viewport of `viewport_size`. `None` when the frame changes no
+    /// pixel, because the shape covers the viewport with square corners.
+    pub fn new(
+        frame: &ClientFrame,
+        viewport_size: Size<Pixels>,
+        scale_factor: f32,
+    ) -> Option<Self> {
+        let tiling = frame.tiling;
+        let inset = |tiled: bool| {
+            if tiled {
+                0.0
+            } else {
+                (frame.inset.0 * scale_factor).round().max(0.0)
+            }
+        };
+        let width = viewport_size.width.0 * scale_factor;
+        let height = viewport_size.height.0 * scale_factor;
+        let left = inset(tiling.left).min(width);
+        let top = inset(tiling.top).min(height);
+        let right = (width - inset(tiling.right)).max(left);
+        let bottom = (height - inset(tiling.bottom)).max(top);
+        let bounds = Bounds::from_corners(
+            point(ScaledPixels(left), ScaledPixels(top)),
+            point(ScaledPixels(right), ScaledPixels(bottom)),
+        );
+
+        let radius = (frame.corner_radius.0 * scale_factor)
+            .min((right - left).min(bottom - top) / 2.0)
+            .max(0.0);
+        let corner = |first_tiled: bool, second_tiled: bool| {
+            ScaledPixels(if first_tiled || second_tiled {
+                0.0
+            } else {
+                radius
+            })
+        };
+        let corner_radii = Corners {
+            top_left: corner(tiling.top, tiling.left),
+            top_right: corner(tiling.top, tiling.right),
+            bottom_right: corner(tiling.bottom, tiling.right),
+            bottom_left: corner(tiling.bottom, tiling.left),
+        };
+
+        let covers_viewport = left == 0.0 && top == 0.0 && right == width && bottom == height;
+        let square = corner_radii == Corners::default();
+        if covers_viewport && square {
+            return None;
+        }
+
+        let viewport = ContentMask {
+            bounds: Bounds::new(
+                point(ScaledPixels(0.0), ScaledPixels(0.0)),
+                Size::new(ScaledPixels(width), ScaledPixels(height)),
+            ),
+        };
+        let shadows = frame
+            .shadows
+            .iter()
+            .filter(|shadow| !shadow.inset)
+            .map(|shadow| Shadow {
+                order: 0,
+                blur_radius: shadow.blur_radius.scale(scale_factor),
+                bounds: (bounds + shadow.offset.scale(scale_factor))
+                    .dilate(shadow.spread_radius.scale(scale_factor)),
+                corner_radii,
+                content_mask: viewport,
+                color: shadow.color,
+                element_bounds: bounds,
+                element_corner_radii: corner_radii,
+                inset: 0,
+                outside_only: 1,
+            })
+            .collect();
+
+        Some(Self {
+            bounds,
+            corner_radii,
+            shadows,
+        })
+    }
+}
+
 /// The style of a border.
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[repr(C)]
@@ -1323,7 +1423,7 @@ impl PathVertex<Pixels> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{bounds, size};
+    use crate::{BoxShadow, Tiling, bounds, size};
 
     fn test_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
         bounds(
@@ -1605,5 +1705,89 @@ mod tests {
                 (PrimitiveKind::Quad, vec![3]),
             ]
         );
+    }
+
+    #[test]
+    fn client_frame_insets_and_rounds_untiled_edges() {
+        let frame = ClientFrame {
+            inset: crate::px(10.0),
+            corner_radius: crate::px(8.0),
+            tiling: Tiling::default(),
+            shadows: smallvec::smallvec![
+                BoxShadow::new(crate::px(0.0), crate::px(2.0), crate::black())
+                    .blur_radius(crate::px(6.0))
+                    .spread_radius(crate::px(1.0)),
+            ],
+        };
+        let scaled =
+            ScaledClientFrame::new(&frame, size(crate::px(200.0), crate::px(100.0)), 2.0).unwrap();
+
+        assert_eq!(scaled.bounds, test_bounds(20.0, 20.0, 360.0, 160.0));
+        assert_eq!(scaled.corner_radii, Corners::all(ScaledPixels(16.0)));
+        let [shadow] = scaled.shadows.as_slice() else {
+            panic!("expected one shadow");
+        };
+        assert_eq!(shadow.bounds, test_bounds(18.0, 22.0, 364.0, 164.0));
+        assert_eq!(shadow.blur_radius, ScaledPixels(12.0));
+        assert_eq!(shadow.element_bounds, scaled.bounds);
+        assert_eq!(shadow.outside_only, 1);
+        assert_eq!(
+            shadow.content_mask.bounds,
+            test_bounds(0.0, 0.0, 400.0, 200.0)
+        );
+    }
+
+    #[test]
+    fn client_frame_squares_corners_on_tiled_edges() {
+        let frame = ClientFrame {
+            inset: crate::px(10.0),
+            corner_radius: crate::px(8.0),
+            tiling: Tiling {
+                left: true,
+                ..Tiling::default()
+            },
+            shadows: smallvec::smallvec![
+                BoxShadow::new(crate::px(0.0), crate::px(0.0), crate::black()).inset(),
+            ],
+        };
+        let scaled =
+            ScaledClientFrame::new(&frame, size(crate::px(200.0), crate::px(100.0)), 1.0).unwrap();
+
+        assert_eq!(scaled.bounds, test_bounds(0.0, 10.0, 190.0, 80.0));
+        assert_eq!(
+            scaled.corner_radii,
+            Corners {
+                top_left: ScaledPixels(0.0),
+                top_right: ScaledPixels(8.0),
+                bottom_right: ScaledPixels(8.0),
+                bottom_left: ScaledPixels(0.0),
+            }
+        );
+        assert!(scaled.shadows.is_empty(), "inset shadows are ignored");
+    }
+
+    #[test]
+    fn client_frame_that_changes_no_pixel_is_skipped() {
+        let viewport = size(crate::px(200.0), crate::px(100.0));
+        let tiled = ClientFrame {
+            inset: crate::px(10.0),
+            corner_radius: crate::px(8.0),
+            tiling: Tiling::tiled(),
+            shadows: Default::default(),
+        };
+        assert!(ScaledClientFrame::new(&tiled, viewport, 1.0).is_none());
+        assert!(ScaledClientFrame::new(&ClientFrame::default(), viewport, 1.0).is_none());
+    }
+
+    #[test]
+    fn client_frame_clamps_radius_to_the_shape() {
+        let frame = ClientFrame {
+            inset: crate::px(0.0),
+            corner_radius: crate::px(80.0),
+            ..ClientFrame::default()
+        };
+        let scaled =
+            ScaledClientFrame::new(&frame, size(crate::px(200.0), crate::px(100.0)), 1.0).unwrap();
+        assert_eq!(scaled.corner_radii, Corners::all(ScaledPixels(50.0)));
     }
 }
