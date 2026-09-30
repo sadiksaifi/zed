@@ -533,6 +533,48 @@ impl TestAppContext {
         self.test_platform.simulate_button_layout(layout);
     }
 
+    /// Simulates a screen reader connecting to the window, then runs until
+    /// parked, so the window has drawn and sent its accessibility tree.
+    ///
+    /// Panics when the window did not initialize accessibility, for example
+    /// after [`Self::disable_accessibility`].
+    pub fn activate_accessibility(&self, window_handle: AnyWindowHandle) {
+        assert!(
+            self.test_window(window_handle).simulate_a11y_activation(),
+            "accessibility is disabled for this window"
+        );
+        self.run_until_parked();
+    }
+
+    /// Simulates the screen reader disconnecting from the window, then runs
+    /// until parked.
+    ///
+    /// Panics when the window did not initialize accessibility.
+    pub fn deactivate_accessibility(&self, window_handle: AnyWindowHandle) {
+        assert!(
+            self.test_window(window_handle).simulate_a11y_deactivation(),
+            "accessibility is disabled for this window"
+        );
+        self.run_until_parked();
+    }
+
+    /// Simulates a screen reader requesting an action on the window's
+    /// accessibility tree, then runs until parked.
+    ///
+    /// Panics when the window did not initialize accessibility.
+    pub fn simulate_accessibility_action(
+        &self,
+        window_handle: AnyWindowHandle,
+        request: accesskit::ActionRequest,
+    ) {
+        assert!(
+            self.test_window(window_handle)
+                .simulate_a11y_action(request),
+            "accessibility is disabled for this window"
+        );
+        self.run_until_parked();
+    }
+
     /// Returns every window-management request the window received, oldest first.
     pub fn window_requests(&self, window_handle: AnyWindowHandle) -> Vec<TestWindowRequest> {
         self.test_window(window_handle).requests()
@@ -1041,6 +1083,24 @@ impl VisualTestContext {
     pub fn simulate_window_controls(&self, window_controls: WindowControls) {
         self.cx
             .simulate_window_controls(self.window, window_controls);
+    }
+
+    /// Simulates a screen reader connecting to this window, then runs until
+    /// parked. See [`TestAppContext::activate_accessibility`].
+    pub fn activate_accessibility(&self) {
+        self.cx.activate_accessibility(self.window);
+    }
+
+    /// Simulates the screen reader disconnecting from this window, then runs
+    /// until parked. See [`TestAppContext::deactivate_accessibility`].
+    pub fn deactivate_accessibility(&self) {
+        self.cx.deactivate_accessibility(self.window);
+    }
+
+    /// Simulates a screen reader requesting an action, then runs until parked.
+    /// See [`TestAppContext::simulate_accessibility_action`].
+    pub fn simulate_accessibility_action(&self, request: accesskit::ActionRequest) {
+        self.cx.simulate_accessibility_action(self.window, request);
     }
 
     /// Returns every window-management request this window received, oldest first.

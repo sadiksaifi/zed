@@ -1,10 +1,10 @@
 use crate::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, GpuSpecs,
-    HeadlessAtlas, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, ResizeEdge,
-    Scene, Size, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowInsets,
-    WindowParams, WindowVisibility,
+    A11yCallbacks, AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult,
+    GpuSpecs, HeadlessAtlas, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
+    ResizeEdge, Scene, Size, TestPlatform, TextInputConfiguration, TextInputStateChange,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowInsets, WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
@@ -77,6 +77,7 @@ pub(crate) struct TestWindowState {
     frame_scheduled: bool,
     frame_callback_pending: bool,
     input_handler: Option<PlatformInputHandler>,
+    a11y_callbacks: Option<Rc<A11yCallbacks>>,
     text_input_configurations: Vec<TextInputConfiguration>,
     text_input_state_changes: Vec<TextInputStateChange>,
     #[cfg(target_os = "macos")]
@@ -157,6 +158,7 @@ impl TestWindow {
             frame_scheduled: false,
             frame_callback_pending: false,
             input_handler: None,
+            a11y_callbacks: None,
             text_input_configurations: Vec::new(),
             text_input_state_changes: Vec::new(),
             #[cfg(target_os = "macos")]
@@ -252,6 +254,34 @@ impl TestWindow {
     #[cfg(target_os = "macos")]
     pub fn traffic_light_position_updates(&self) -> Vec<Point<Pixels>> {
         self.0.lock().traffic_light_position_updates.clone()
+    }
+
+    /// Simulates an assistive technology connecting to this window. Returns
+    /// false when the window did not initialize accessibility.
+    pub fn simulate_a11y_activation(&self) -> bool {
+        self.with_a11y_callbacks(|callbacks| {
+            (callbacks.activation)();
+        })
+    }
+
+    /// Simulates the assistive technology disconnecting from this window.
+    /// Returns false when the window did not initialize accessibility.
+    pub fn simulate_a11y_deactivation(&self) -> bool {
+        self.with_a11y_callbacks(|callbacks| (callbacks.deactivation)())
+    }
+
+    /// Simulates an assistive technology requesting an action. Returns false
+    /// when the window did not initialize accessibility.
+    pub fn simulate_a11y_action(&self, request: accesskit::ActionRequest) -> bool {
+        self.with_a11y_callbacks(|callbacks| (callbacks.action)(request))
+    }
+
+    fn with_a11y_callbacks(&self, f: impl FnOnce(&A11yCallbacks)) -> bool {
+        let Some(callbacks) = self.0.lock().a11y_callbacks.clone() else {
+            return false;
+        };
+        f(&callbacks);
+        true
     }
 
     /// Every [`TestWindowRequest`] made of this window, oldest first.
@@ -699,6 +729,10 @@ impl PlatformWindow for TestWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+
+    fn a11y_init(&self, callbacks: A11yCallbacks) {
+        self.0.lock().a11y_callbacks = Some(Rc::new(callbacks));
+    }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None

@@ -10162,6 +10162,75 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn test_accessibility_activation_in_tests(cx: &mut TestAppContext) {
+        struct AccessibleView {
+            root_focus_requests: Rc<Cell<usize>>,
+        }
+
+        impl Render for AccessibleView {
+            fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let root_focus_requests = self.root_focus_requests.clone();
+                window.on_a11y_action(
+                    accesskit::NodeId(0),
+                    accesskit::Action::Focus,
+                    move |_, _, _| root_focus_requests.set(root_focus_requests.get() + 1),
+                );
+                div().size_full().child(
+                    div()
+                        .id("confirm")
+                        .role(accesskit::Role::Button)
+                        .aria_label("Confirm")
+                        .size(px(10.)),
+                )
+            }
+        }
+
+        let root_focus_requests = Rc::new(Cell::new(0));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let root_focus_requests = root_focus_requests.clone();
+                move |_, _| AccessibleView {
+                    root_focus_requests,
+                }
+            })
+            .into();
+        let a11y_state = |cx: &mut TestAppContext| {
+            cx.update_window(window, |_, window, _| {
+                (window.is_a11y_active(), window.debug_a11y_tree_json())
+            })
+            .unwrap()
+        };
+        assert!(!a11y_state(cx).0);
+
+        cx.activate_accessibility(window);
+        let (active, tree) = a11y_state(cx);
+        assert!(active);
+        assert!(tree.expect("an accessibility tree").contains("Confirm"));
+
+        cx.simulate_accessibility_action(
+            window,
+            accesskit::ActionRequest {
+                action: accesskit::Action::Focus,
+                target_tree: accesskit::TreeId::ROOT,
+                target_node: accesskit::NodeId(0),
+                data: None,
+            },
+        );
+        assert_eq!(root_focus_requests.get(), 1);
+
+        cx.deactivate_accessibility(window);
+        assert!(!a11y_state(cx).0);
+    }
+
+    #[gpui::test]
+    #[should_panic(expected = "accessibility is disabled for this window")]
+    fn test_accessibility_activation_requires_accessibility(cx: &mut TestAppContext) {
+        cx.disable_accessibility();
+        let window = cx.add_window(|_, _| EmptyView);
+        cx.activate_accessibility(window.into());
+    }
+
     #[cfg(target_os = "macos")]
     #[gpui::test]
     fn test_traffic_light_position_updates(cx: &mut TestAppContext) {
