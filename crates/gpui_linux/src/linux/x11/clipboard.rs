@@ -717,8 +717,16 @@ impl Inner {
         } else {
             log::trace!("Handling request for (probably) the clipboard contents.");
             let data = self.selection_of(selection).data.read();
+            // TARGETS advertises the text/plain;charset=utf-8 names for UTF8_STRING data.
+            let data_format = if event.target == self.atoms.UTF8_MIME_0
+                || event.target == self.atoms.UTF8_MIME_1
+            {
+                self.atoms.UTF8_STRING
+            } else {
+                event.target
+            };
             if let Some(data_list) = &*data {
-                success = match data_list.iter().find(|d| d.format == event.target) {
+                success = match data_list.iter().find(|d| d.format == data_format) {
                     Some(data) => {
                         self.server
                             .conn
