@@ -373,7 +373,6 @@ pub(crate) struct WaylandClientState {
     data_offers: Vec<DataOffer<WlDataOffer>>,
     primary_data_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
     cursor: Cursor,
-    pending_activation: Option<PendingActivation>,
     startup_activation_token: Option<String>,
     event_loop: Option<EventLoop<'static, WaylandClientStatePtr>>,
     pub common: LinuxCommon,
@@ -501,6 +500,9 @@ pub(crate) struct KeyRepeat {
     current_keycode: Option<xkb::Keycode>,
 }
 
+/// What an xdg-activation token is requested for. Each token carries its own request
+/// as user data, so concurrent requests cannot receive each other's tokens.
+#[derive(Clone, Debug)]
 pub(crate) enum PendingActivation {
     /// URI to open in the web browser.
     Uri(String),
@@ -615,11 +617,6 @@ impl WaylandClientStatePtr {
             window,
         });
         true
-    }
-
-    pub fn set_pending_activation(&self, window: ObjectId) {
-        self.0.upgrade().unwrap().borrow_mut().pending_activation =
-            Some(PendingActivation::Window(window));
     }
 
     pub fn enable_ime(&self) {
@@ -1057,7 +1054,6 @@ impl WaylandClient {
             data_offers: Vec::new(),
             primary_data_offer: None,
             cursor,
-            pending_activation: None,
             startup_activation_token,
             event_loop: Some(event_loop),
             ime_enabled: None,
@@ -1243,13 +1239,13 @@ impl LinuxClient for WaylandClient {
     }
 
     fn open_uri(&self, uri: &str) {
-        let mut state = self.0.borrow_mut();
+        let state = self.0.borrow();
         if let (Some(activation), Some(window)) = (
             state.globals.activation.clone(),
             state.mouse_focused_window.clone(),
         ) {
-            state.pending_activation = Some(PendingActivation::Uri(uri.to_string()));
-            let token = activation.get_activation_token(&state.globals.qh, ());
+            let token = activation
+                .get_activation_token(&state.globals.qh, PendingActivation::Uri(uri.to_string()));
             let serial = state.serial_tracker.get(SerialKind::MousePress);
             token.set_serial(serial.as_raw(), &state.wl_seat);
             token.set_surface(&window.surface());
@@ -1261,13 +1257,13 @@ impl LinuxClient for WaylandClient {
     }
 
     fn reveal_path(&self, path: PathBuf) {
-        let mut state = self.0.borrow_mut();
+        let state = self.0.borrow();
         if let (Some(activation), Some(window)) = (
             state.globals.activation.clone(),
             state.mouse_focused_window.clone(),
         ) {
-            state.pending_activation = Some(PendingActivation::Path(path));
-            let token = activation.get_activation_token(&state.globals.qh, ());
+            let token =
+                activation.get_activation_token(&state.globals.qh, PendingActivation::Path(path));
             let serial = state.serial_tracker.get(SerialKind::MousePress);
             token.set_serial(serial.as_raw(), &state.wl_seat);
             token.set_surface(&window.surface());
@@ -1743,12 +1739,14 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for WaylandClientStatePtr {
     }
 }
 
-impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for WaylandClientStatePtr {
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, PendingActivation>
+    for WaylandClientStatePtr
+{
     fn event(
         this: &mut Self,
         token: &xdg_activation_token_v1::XdgActivationTokenV1,
         event: <xdg_activation_token_v1::XdgActivationTokenV1 as Proxy>::Event,
-        _: &(),
+        pending_activation: &PendingActivation,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
@@ -1757,19 +1755,17 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for WaylandClie
 
         if let xdg_activation_token_v1::Event::Done { token } = event {
             let executor = state.common.background_executor.clone();
-            match state.pending_activation.take() {
-                Some(PendingActivation::Uri(uri)) => open_uri_internal(executor, &uri, Some(token)),
-                Some(PendingActivation::Path(path)) => {
-                    reveal_path_internal(executor, path, Some(token))
+            match pending_activation {
+                PendingActivation::Uri(uri) => open_uri_internal(executor, uri, Some(token)),
+                PendingActivation::Path(path) => {
+                    reveal_path_internal(executor, path.clone(), Some(token))
                 }
-                Some(PendingActivation::Window(window)) => {
-                    let Some(window) = get_window(&mut state, &window) else {
-                        return;
-                    };
-                    let activation = state.globals.activation.as_ref().unwrap();
-                    activation.activate(token, &window.surface());
+                PendingActivation::Window(window) => {
+                    if let Some(window) = get_window(&mut state, window) {
+                        let activation = state.globals.activation.as_ref().unwrap();
+                        activation.activate(token, &window.surface());
+                    }
                 }
-                None => log::error!("activation token received with no pending activation"),
             }
         }
 
