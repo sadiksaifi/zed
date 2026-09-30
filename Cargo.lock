@@ -7642,6 +7642,7 @@ dependencies = [
  "x11-clipboard",
  "x11rb",
  "xkbcommon",
+ "yeslogic-fontconfig-sys",
  "zed-scap",
  "zed-xim",
 ]
