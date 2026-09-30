@@ -1850,7 +1850,27 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
-    fn request_attention(&self) {}
+    fn request_attention(&self) {
+        // xdg-activation has no request for attention of its own. Mutter and KWin mark a window
+        // demanding attention when it asks to be activated without a user interaction, so
+        // request a token without an input serial and activate the window with it.
+        let state = self.borrow();
+        if state.active {
+            return;
+        }
+        let Some(activation) = &state.globals.activation else {
+            return;
+        };
+        let token = activation.get_activation_token(
+            &state.globals.qh,
+            PendingActivation::Window(state.surface.id()),
+        );
+        if let Some(app_id) = state.app_id.clone() {
+            token.set_app_id(app_id);
+        }
+        token.set_surface(&state.surface);
+        token.commit();
+    }
 
     fn is_active(&self) -> bool {
         self.borrow().active
