@@ -1850,6 +1850,13 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    fn activate_with_token(&self, token: &str) {
+        let state = self.borrow();
+        if let Some(activation) = &state.globals.activation {
+            activation.activate(token.to_owned(), &state.surface);
+        }
+    }
+
     fn request_attention(&self) {
         // xdg-activation has no request for attention of its own. Mutter and KWin mark a window
         // demanding attention when it asks to be activated without a user interaction, so

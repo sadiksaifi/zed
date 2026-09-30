@@ -545,6 +545,16 @@ fn set_wm_hints_urgency(xcb: &XCBConnection, x_window: xproto::Window, urgent: b
     xcb_flush(xcb);
 }
 
+/// The X server time embedded in a startup notification ID, which launchers end with
+/// `_TIME` and the timestamp of the user action that started the launch.
+fn startup_notification_timestamp(startup_id: &str) -> Option<u32> {
+    let (_, timestamp) = startup_id.rsplit_once("_TIME")?;
+    timestamp
+        .parse::<u32>()
+        .ok()
+        .filter(|&timestamp| timestamp != u32::from(xproto::Time::CURRENT_TIME))
+}
+
 /// Convert X11 connection errors to `anyhow::Error` and panic for unrecoverable errors.
 pub(crate) fn handle_connection_error(err: ConnectionError) -> anyhow::Error {
     match err {
@@ -1031,6 +1041,28 @@ enum WmHintPropertyState {
 }
 
 impl X11Window {
+    /// Asks the window manager to activate this window, on behalf of an application
+    /// (EWMH source indication 1) and with the timestamp of the user action that led here.
+    fn request_active_window(&self, timestamp: u32) {
+        let data = [1, timestamp, 0, 0, 0];
+        let message = xproto::ClientMessageEvent::new(
+            32,
+            self.0.x_window,
+            self.0.state.borrow().atoms._NET_ACTIVE_WINDOW,
+            data,
+        );
+        self.0
+            .xcb
+            .send_event(
+                false,
+                self.0.state.borrow().x_root_window,
+                xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
+                message,
+            )
+            .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
     pub fn new(
         handle: AnyWindowHandle,
         client: X11ClientStatePtr,
@@ -1673,23 +1705,13 @@ impl PlatformWindow for X11Window {
     }
 
     fn activate(&self) {
-        let data = [1, xproto::Time::CURRENT_TIME.into(), 0, 0, 0];
-        let message = xproto::ClientMessageEvent::new(
-            32,
-            self.0.x_window,
-            self.0.state.borrow().atoms._NET_ACTIVE_WINDOW,
-            data,
+        self.request_active_window(xproto::Time::CURRENT_TIME.into());
+    }
+
+    fn activate_with_token(&self, token: &str) {
+        self.request_active_window(
+            startup_notification_timestamp(token).unwrap_or(xproto::Time::CURRENT_TIME.into()),
         );
-        self.0
-            .xcb
-            .send_event(
-                false,
-                self.0.state.borrow().x_root_window,
-                xproto::EventMask::SUBSTRUCTURE_REDIRECT | xproto::EventMask::SUBSTRUCTURE_NOTIFY,
-                message,
-            )
-            .log_err();
-        xcb_flush(&self.0.xcb);
     }
 
     fn request_attention(&self) {
@@ -2239,7 +2261,7 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::SizeLimits;
+    use super::{SizeLimits, startup_notification_timestamp};
     use gpui::{DevicePixels, Size, px, size};
 
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
@@ -2277,5 +2299,26 @@ mod tests {
         let hints = limits.normal_hints(device_size(1400, 900), 2.0);
         assert_eq!(hints.min_size, Some((1400, 900)));
         assert_eq!(hints.max_size, Some((1400, 900)));
+    }
+
+    #[test]
+    fn reads_the_timestamp_at_the_end_of_a_startup_notification_id() {
+        assert_eq!(
+            startup_notification_timestamp("gnome-shell/SpaceTerm/4242-0-host_TIME123456"),
+            Some(123456)
+        );
+        assert_eq!(startup_notification_timestamp("a_TIME1_TIME2"), Some(2));
+    }
+
+    #[test]
+    fn ignores_startup_notification_ids_without_a_timestamp() {
+        for startup_id in ["", "host-4242", "host_TIME", "host_TIME12x", "host_TIME0"] {
+            assert_eq!(
+                startup_notification_timestamp(startup_id),
+                None,
+                "{startup_id}"
+            );
+        }
+        assert_eq!(startup_notification_timestamp("host_TIME4294967296"), None);
     }
 }

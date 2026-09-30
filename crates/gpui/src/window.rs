@@ -6754,6 +6754,16 @@ impl Window {
         self.platform_window.activate();
     }
 
+    /// Focuses the current window and brings it to the foreground with an activation token
+    /// that another program passed to this one, such as the token of a notification action
+    /// or of another launch of this application.
+    ///
+    /// On Wayland the token is an xdg-activation token; on X11 it is a startup notification
+    /// ID. Platforms without activation tokens behave like [`Self::activate_window`].
+    pub fn activate_window_with_token(&self, token: &str) {
+        self.platform_window.activate_with_token(token);
+    }
+
     /// Requests that the operating system draw attention to this window.
     pub fn request_attention(&self) {
         self.platform_window.request_attention();
