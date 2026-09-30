@@ -4,11 +4,11 @@ use x11rb::connection::RequestConnection;
 use crate::linux::{TitlebarDoubleClickAction, X11ClientStatePtr};
 use gpui::{
     AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowControls, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
-    popup::PopupNotSupportedError, px,
+    NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge,
+    ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowControls, WindowDecorations, WindowKind, WindowParams,
+    WindowVisibility, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
@@ -361,6 +361,7 @@ pub(crate) struct X11WindowStatePtr {
     pub(crate) frame_demand: Rc<FrameDemand>,
     xcb: Rc<XCBConnection>,
     pub(crate) x_window: xproto::Window,
+    native_key_event: Rc<Cell<Option<NativeKeyEvent>>>,
 }
 
 /// Whether a window wants frames, shared between the window and its client's refresh timer.
@@ -1072,6 +1073,7 @@ impl X11Window {
             frame_demand: Rc::new(FrameDemand::new(frame_wake)),
             xcb: xcb.clone(),
             x_window,
+            native_key_event: Rc::default(),
         };
 
         let state = ptr.state.borrow_mut();
@@ -1346,6 +1348,14 @@ impl X11WindowStatePtr {
                 }
             }
         }
+    }
+
+    /// Delivers a key or modifiers event along with the XKB facts it was translated from, which
+    /// GPUI reads through [`PlatformWindow::native_key_event`] while it dispatches the event.
+    pub fn handle_native_key_input(&self, input: PlatformInput, native_key_event: NativeKeyEvent) {
+        let outer_native_key_event = self.native_key_event.replace(Some(native_key_event));
+        self.handle_input(input);
+        self.native_key_event.set(outer_native_key_event);
     }
 
     pub fn handle_ime_commit(&self, text: String) {
@@ -1826,6 +1836,10 @@ impl PlatformWindow for X11Window {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
         self.0.callbacks.borrow_mut().input = Some(callback);
+    }
+
+    fn native_key_event(&self) -> Option<NativeKeyEvent> {
+        self.0.native_key_event.get()
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

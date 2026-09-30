@@ -82,6 +82,32 @@ impl Deref for ModifiersChangedEvent {
     }
 }
 
+/// Platform facts about a key-down, key-up or modifiers-changed event, beyond the portable
+/// [`Keystroke`]. Read it with [`Window::native_key_event`] while the event is dispatched.
+///
+/// Only platforms whose keyboard stack exposes these facts report them (Linux X11 and Wayland,
+/// through XKB).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NativeKeyEvent {
+    /// The Linux evdev scancode of the key (the XKB keycode minus 8).
+    pub scancode: u16,
+    /// The effective modifiers, without the Shift folding that [`Keystroke`] applies.
+    pub modifiers: Modifiers,
+    /// The active modifiers the key's translation consumed (XKB's GTK consumed mode), a subset
+    /// of `modifiers`. For example, Shift is consumed when Shift+1 produces `!`.
+    pub consumed: Modifiers,
+    /// The character the key produces without modifiers in the active layout.
+    pub unshifted: Option<char>,
+    /// Whether Caps Lock is active.
+    pub caps_lock: bool,
+    /// Whether Num Lock is active.
+    pub num_lock: bool,
+    /// For a modifier key's own press or release, `(evdev scancode, pressed)`. Such events are
+    /// reported as [`ModifiersChangedEvent`]s whose modifiers already include the transition.
+    /// `None` for other keys and for aggregate modifier state changes.
+    pub modifier_key: Option<(u16, bool)>,
+}
+
 /// The phase of a touch motion event.
 /// Based on the winit enum of the same name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -34,10 +34,11 @@ use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, TitlebarDoubleClickAction, WaylandClientStatePtr, get_window};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
-    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowControls, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
+    Modifiers, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    ResizeEdge, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowControls, WindowDecorations, WindowKind, WindowParams,
+    WindowVisibility,
     layer_shell::{Anchor, LayerShellNotSupportedError},
     popup::PopupOptions,
     px, size,
@@ -544,6 +545,7 @@ pub struct WaylandWindowStatePtr {
     callbacks: Rc<RefCell<Callbacks>>,
     frame_loop: Rc<Cell<FrameLoop>>,
     frame_ping: Ping,
+    native_key_event: Rc<Cell<Option<NativeKeyEvent>>>,
 }
 
 impl WaylandWindowState {
@@ -894,6 +896,7 @@ impl WaylandWindow {
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
             frame_loop: Rc::new(Cell::new(FrameLoop::Unconfigured)),
             frame_ping,
+            native_key_event: Rc::default(),
         });
 
         // Kick things off
@@ -1587,6 +1590,14 @@ impl WaylandWindowStatePtr {
         }
     }
 
+    /// Delivers a key or modifiers event along with the XKB facts it was translated from, which
+    /// GPUI reads through [`PlatformWindow::native_key_event`] while it dispatches the event.
+    pub fn handle_native_key_input(&self, input: PlatformInput, native_key_event: NativeKeyEvent) {
+        let outer_native_key_event = self.native_key_event.replace(Some(native_key_event));
+        self.handle_input(input);
+        self.native_key_event.set(outer_native_key_event);
+    }
+
     pub fn set_focused(&self, focus: bool) {
         self.state.borrow_mut().active = focus;
         let callback = self.callbacks.borrow_mut().active_status_change.take();
@@ -1927,6 +1938,10 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
         self.0.callbacks.borrow_mut().input = Some(callback);
+    }
+
+    fn native_key_event(&self) -> Option<NativeKeyEvent> {
+        self.0.native_key_event.get()
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

@@ -13,6 +13,8 @@ mod x11;
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod xdg_desktop_portal;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod xkb_facts;
 
 pub use dispatcher::*;
 pub(crate) use headless::*;

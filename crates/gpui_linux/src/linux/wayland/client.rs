@@ -95,6 +95,7 @@ use crate::linux::{
         window::WaylandWindow,
     },
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
+    xkb_facts::{modifier_key_changed_event, modifier_key_event, native_key_event},
 };
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, CursorStyle, DevicePixels, DisplayId, ExternalDragPayload,
@@ -1972,8 +1973,26 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keycode = Keycode::from(key + MIN_KEYCODE);
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
+                if keysym.is_modifier_key() {
+                    let pressed = match key_state {
+                        wl_keyboard::KeyState::Pressed => true,
+                        wl_keyboard::KeyState::Released => false,
+                        _ => return,
+                    };
+                    // The compositor reports the resulting modifier state separately, after
+                    // this key event.
+                    let native = modifier_key_event(keymap_state, keycode, pressed);
+                    drop(state);
+                    focused_window.handle_native_key_input(
+                        PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
+                        native,
+                    );
+                    return;
+                }
+
+                let native = native_key_event(keymap_state, keycode);
                 match key_state {
-                    wl_keyboard::KeyState::Pressed if !keysym.is_modifier_key() => {
+                    wl_keyboard::KeyState::Pressed => {
                         let mut keystroke =
                             keystroke_from_xkb(keymap_state, state.modifiers, keycode);
                         if let Some(mut compose) = state.compose_state.take() {
@@ -2051,7 +2070,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                         state.keyboard_focused_window.as_ref().unwrap().clone();
 
                                     drop(state);
-                                    focused_window.handle_input(input.clone());
+                                    focused_window.handle_native_key_input(input.clone(), native);
 
                                     // If the new scheduled time is in the past the event will repeat as soon as possible
                                     TimeoutAction::ToInstant(event_timestamp + repeat_interval)
@@ -2060,9 +2079,9 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                             .unwrap();
 
                         drop(state);
-                        focused_window.handle_input(input);
+                        focused_window.handle_native_key_input(input, native);
                     }
-                    wl_keyboard::KeyState::Released if !keysym.is_modifier_key() => {
+                    wl_keyboard::KeyState::Released => {
                         let input = PlatformInput::KeyUp(KeyUpEvent {
                             keystroke: keystroke_from_xkb(keymap_state, state.modifiers, keycode),
                         });
@@ -2072,7 +2091,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                         }
 
                         drop(state);
-                        focused_window.handle_input(input);
+                        focused_window.handle_native_key_input(input, native);
                     }
                     _ => {}
                 }

@@ -2,12 +2,12 @@ use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, Decorations, DrawPhase,
     Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
-    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
-    SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestWindow, TestWindowRequest, TextSystem, VisualContext, Window,
-    WindowBounds, WindowButtonLayout, WindowControls, WindowHandle, WindowOptions,
-    WindowVisibility, app::GpuiMode, window::ElementArenaScope,
+    KeyEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NativeKeyEvent, Pixels, Platform, PlatformTextSystem, Point,
+    Render, Result, SharedString, Size, SystemNotification, SystemNotificationResponse, Task,
+    TestDispatcher, TestPlatform, TestScreenCaptureSource, TestWindow, TestWindowRequest,
+    TextSystem, VisualContext, Window, WindowBounds, WindowButtonLayout, WindowControls,
+    WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -1148,6 +1148,19 @@ impl VisualTestContext {
     pub fn simulate_event<E: InputEvent>(&mut self, event: E) {
         self.test_window(self.window)
             .simulate_input(event.to_platform_input());
+        self.background_executor.run_until_parked();
+    }
+
+    /// Simulate a key event from the platform along with the platform facts it carries, as
+    /// [`Window::native_key_event`] reports them during dispatch.
+    /// Make sure you've called [VisualTestContext::draw] first!
+    pub fn simulate_native_key_event<E: KeyEvent>(
+        &mut self,
+        event: E,
+        native_key_event: NativeKeyEvent,
+    ) {
+        self.test_window(self.window)
+            .simulate_native_key_input(event.to_platform_input(), native_key_event);
         self.background_executor.run_until_parked();
     }
 

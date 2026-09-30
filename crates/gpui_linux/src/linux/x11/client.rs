@@ -58,7 +58,10 @@ use crate::linux::{
     reveal_path_internal,
     xdg_desktop_portal::{Event as XDPEvent, XDPEventSource},
 };
-use crate::linux::{LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info};
+use crate::linux::{
+    LinuxCommon, LinuxKeyboardLayout, X11Window, modifiers_from_xinput_info,
+    xkb_facts::{modifier_key_changed_event, modifier_key_event, native_key_event},
+};
 
 use gpui::{
     AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
@@ -1115,15 +1118,22 @@ impl X11Client {
                 state.modifiers = modifiers;
                 state.pre_key_char_down.take();
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
+                let code = event.detail.into();
+                let keysym = key_event_state.key_get_one_sym(code);
 
+                if keysym.is_modifier_key() {
+                    let native = modifier_key_event(&key_event_state, code, true);
+                    drop(state);
+                    window.handle_native_key_input(
+                        PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
+                        native,
+                    );
+                    return Some(());
+                }
+
+                let native = native_key_event(&key_event_state, code);
                 let keystroke = {
-                    let code = event.detail.into();
                     let mut keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
-                    let keysym = key_event_state.key_get_one_sym(code);
-
-                    if keysym.is_modifier_key() {
-                        return Some(());
-                    }
 
                     if let Some(mut compose_state) = state.compose_state.take() {
                         compose_state.feed(keysym);
@@ -1165,11 +1175,14 @@ impl X11Client {
                     keystroke
                 };
                 drop(state);
-                window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
-                    keystroke,
-                    is_held: false,
-                    prefer_character_input: false,
-                }));
+                window.handle_native_key_input(
+                    PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke,
+                        is_held: false,
+                        prefer_character_input: false,
+                    }),
+                    native,
+                );
             }
             Event::KeyRelease(event) => {
                 let window = self.get_window(event.event)?;
@@ -1178,20 +1191,26 @@ impl X11Client {
                 let modifiers = modifiers_from_state(event.state);
                 state.modifiers = modifiers;
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
+                let code = event.detail.into();
+                let keysym = key_event_state.key_get_one_sym(code);
 
-                let keystroke = {
-                    let code = event.detail.into();
-                    let keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
-                    let keysym = key_event_state.key_get_one_sym(code);
+                if keysym.is_modifier_key() {
+                    let native = modifier_key_event(&key_event_state, code, false);
+                    drop(state);
+                    window.handle_native_key_input(
+                        PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
+                        native,
+                    );
+                    return Some(());
+                }
 
-                    if keysym.is_modifier_key() {
-                        return Some(());
-                    }
-
-                    keystroke
-                };
+                let native = native_key_event(&key_event_state, code);
+                let keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
                 drop(state);
-                window.handle_input(PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }));
+                window.handle_native_key_input(
+                    PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+                    native,
+                );
             }
             Event::XinputButtonPress(event) => {
                 let window = self.get_window(event.event)?;

@@ -1,10 +1,10 @@
 use crate::{
     A11yCallbacks, AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult,
-    GpuSpecs, HeadlessAtlas, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
-    ResizeEdge, Scene, Size, TestPlatform, TextInputConfiguration, TextInputStateChange,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
-    WindowInsets, WindowParams, WindowVisibility,
+    GpuSpecs, HeadlessAtlas, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PromptButton, RequestFrameOptions, ResizeEdge, Scene, Size, TestPlatform,
+    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowControls, WindowInsets, WindowParams, WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
@@ -58,6 +58,7 @@ pub(crate) struct TestWindowState {
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
+    native_key_event: Option<NativeKeyEvent>,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     visibility: WindowVisibility,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
@@ -171,6 +172,7 @@ impl TestWindow {
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
+            native_key_event: None,
         })))
     }
     pub fn simulate_scheduled_frame(&self) -> bool {
@@ -385,6 +387,18 @@ impl TestWindow {
         let result = callback(event);
         self.0.lock().input_callback = Some(callback);
         !result.propagate
+    }
+
+    /// Delivers a key event with the platform facts a native platform would report for it.
+    pub fn simulate_native_key_input(
+        &mut self,
+        event: PlatformInput,
+        native_key_event: NativeKeyEvent,
+    ) -> bool {
+        let outer_native_key_event = self.0.lock().native_key_event.replace(native_key_event);
+        let handled = self.simulate_input(event);
+        self.0.lock().native_key_event = outer_native_key_event;
+        handled
     }
 
     pub fn external_drag_files(&self) -> Vec<(PathBuf, bool)> {
@@ -613,6 +627,10 @@ impl PlatformWindow for TestWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>) {
         self.0.lock().input_callback = Some(callback)
+    }
+
+    fn native_key_event(&self) -> Option<NativeKeyEvent> {
+        self.0.lock().native_key_event
     }
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {

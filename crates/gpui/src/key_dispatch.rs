@@ -2024,4 +2024,133 @@ mod tests {
         cx.simulate_keystrokes("ctrl-b [");
         test.update(cx, |test, _| assert_eq!(test.text.borrow().as_str(), "["))
     }
+
+    type NativeKeyEventLog = Rc<RefCell<Vec<(String, Option<crate::NativeKeyEvent>)>>>;
+
+    struct NativeKeyEventTestView {
+        focus_handle: FocusHandle,
+        log: NativeKeyEventLog,
+    }
+
+    impl Render for NativeKeyEventTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use crate::{InteractiveElement as _, Styled as _};
+            let key_down_log = self.log.clone();
+            let key_up_log = self.log.clone();
+            let modifiers_log = self.log.clone();
+            crate::div()
+                .key_context("Terminal")
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .on_key_down(move |event, window, _| {
+                    key_down_log.borrow_mut().push((
+                        format!("down {}", event.keystroke.key),
+                        window.native_key_event(),
+                    ));
+                })
+                .on_key_up(move |event, window, _| {
+                    key_up_log.borrow_mut().push((
+                        format!("up {}", event.keystroke.key),
+                        window.native_key_event(),
+                    ));
+                })
+                .on_modifiers_changed(move |_, window, _| {
+                    modifiers_log
+                        .borrow_mut()
+                        .push(("modifiers".into(), window.native_key_event()));
+                })
+        }
+    }
+
+    fn setup_native_key_event_test(
+        cx: &mut TestAppContext,
+        bindings: impl IntoIterator<Item = KeyBinding>,
+    ) -> (&mut VisualTestContext, NativeKeyEventLog) {
+        cx.update(|cx| cx.bind_keys(bindings));
+        let log = NativeKeyEventLog::default();
+        let (view, cx) = cx.add_window_view(|_, cx| NativeKeyEventTestView {
+            focus_handle: cx.focus_handle(),
+            log: log.clone(),
+        });
+        let focus_handle = cx.update(|_, cx| view.read(cx).focus_handle.clone());
+        cx.update(|window, cx| {
+            window.focus(&focus_handle, cx);
+            window.activate_window();
+        });
+        (cx, log)
+    }
+
+    fn key_down(key: &str) -> crate::KeyDownEvent {
+        crate::KeyDownEvent {
+            keystroke: Keystroke::parse(key).expect("valid keystroke"),
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    fn native_key(scancode: u16, unshifted: char) -> crate::NativeKeyEvent {
+        crate::NativeKeyEvent {
+            scancode,
+            unshifted: Some(unshifted),
+            ..Default::default()
+        }
+    }
+
+    #[crate::test]
+    fn test_native_key_event_is_visible_while_its_event_dispatches(cx: &mut TestAppContext) {
+        let (cx, log) = setup_native_key_event_test(cx, []);
+        let a = native_key(30, 'a');
+        let left_shift = crate::NativeKeyEvent {
+            scancode: 42,
+            modifiers: Modifiers::shift(),
+            modifier_key: Some((42, true)),
+            ..Default::default()
+        };
+
+        cx.simulate_native_key_event(key_down("a"), a);
+        cx.simulate_native_key_event(
+            crate::KeyUpEvent {
+                keystroke: Keystroke::parse("a").expect("valid keystroke"),
+            },
+            a,
+        );
+        cx.simulate_native_key_event(
+            crate::ModifiersChangedEvent {
+                modifiers: Modifiers::shift(),
+                capslock: crate::Capslock::default(),
+            },
+            left_shift,
+        );
+        cx.simulate_keystrokes("b");
+
+        assert_eq!(
+            *log.borrow(),
+            [
+                ("down a".to_string(), Some(a)),
+                ("up a".to_string(), Some(a)),
+                ("modifiers".to_string(), Some(left_shift)),
+                ("down b".to_string(), None),
+            ]
+        );
+        cx.update(|window, _| assert_eq!(window.native_key_event(), None));
+    }
+
+    #[crate::test]
+    fn test_replayed_keystrokes_carry_no_native_key_event(cx: &mut TestAppContext) {
+        let (cx, log) =
+            setup_native_key_event_test(cx, [KeyBinding::new("j k", TestAction, Some("Terminal"))]);
+        let x = native_key(45, 'x');
+
+        cx.simulate_native_key_event(key_down("j"), native_key(36, 'j'));
+        assert!(log.borrow().is_empty());
+        cx.simulate_native_key_event(key_down("x"), x);
+
+        assert_eq!(
+            *log.borrow(),
+            [
+                ("down j".to_string(), None),
+                ("down x".to_string(), Some(x))
+            ]
+        );
+    }
 }

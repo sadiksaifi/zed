@@ -12,9 +12,9 @@ use crate::{
     Entity, EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId,
     GpuSpecs, Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, NativeKeyEvent, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, Rgba,
     SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledClientFrame,
     ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite,
@@ -1203,6 +1203,7 @@ pub struct Window {
     mouse_hit_test: HitTest,
     modifiers: Modifiers,
     capslock: Capslock,
+    native_key_event: Option<NativeKeyEvent>,
     scale_factor: f32,
     pub(crate) bounds_observers: SubscriberSet<(), AnyObserver>,
     appearance: WindowAppearance,
@@ -1945,7 +1946,12 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move |event| {
                 handle
-                    .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .update(&mut cx, |_, window, cx| {
+                        let native_key_event = window.platform_window.native_key_event();
+                        window.with_native_key_event(native_key_event, |window| {
+                            window.dispatch_event(event, cx)
+                        })
+                    })
                     .log_err()
                     .unwrap_or(DispatchEventResult::default())
             })
@@ -2064,6 +2070,7 @@ impl Window {
             mouse_hit_test: HitTest::default(),
             modifiers,
             capslock,
+            native_key_event: None,
             scale_factor,
             bounds_observers: SubscriberSet::new(),
             appearance,
@@ -3292,6 +3299,26 @@ impl Window {
     /// The current state of the keyboard's capslock
     pub fn capslock(&self) -> Capslock {
         self.capslock
+    }
+
+    /// The platform facts for the key-down, key-up or modifiers-changed event being dispatched
+    /// right now, for listeners and actions that need more than the portable [`Keystroke`].
+    ///
+    /// Returns `None` outside the dispatch of a platform key event, for synthetic, simulated and
+    /// replayed keystrokes, and on platforms that do not report these facts.
+    pub fn native_key_event(&self) -> Option<NativeKeyEvent> {
+        self.native_key_event
+    }
+
+    fn with_native_key_event<R>(
+        &mut self,
+        native_key_event: Option<NativeKeyEvent>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let outer_native_key_event = mem::replace(&mut self.native_key_event, native_key_event);
+        let result = f(self);
+        self.native_key_event = outer_native_key_event;
+        result
     }
 
     /// Produces a new frame and assigns it to `rendered_frame`. To actually show
@@ -5664,6 +5691,12 @@ impl Window {
     /// Dispatch a given keystroke as though the user had typed it.
     /// You can create a keystroke with Keystroke::parse("").
     pub fn dispatch_keystroke(&mut self, keystroke: Keystroke, cx: &mut App) -> bool {
+        self.with_native_key_event(None, |window| {
+            window.dispatch_simulated_keystroke(keystroke, cx)
+        })
+    }
+
+    fn dispatch_simulated_keystroke(&mut self, keystroke: Keystroke, cx: &mut App) -> bool {
         let keystroke = keystroke.with_simulated_ime();
         let result = self.dispatch_event(
             PlatformInput::KeyDown(KeyDownEvent {
@@ -6512,6 +6545,12 @@ impl Window {
     }
 
     fn replay_pending_input(&mut self, replays: SmallVec<[Replay; 1]>, cx: &mut App) {
+        // Replayed keystrokes were typed before the event being dispatched now, so that event's
+        // platform facts do not describe them.
+        self.with_native_key_event(None, |window| window.dispatch_replayed_input(replays, cx))
+    }
+
+    fn dispatch_replayed_input(&mut self, replays: SmallVec<[Replay; 1]>, cx: &mut App) {
         let node_id = self.focus_node_id_in_rendered_frame(self.focus);
         let dispatch_path = self.rendered_frame.dispatch_tree.dispatch_path(node_id);
 
