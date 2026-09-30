@@ -19,7 +19,6 @@
 // https://freedesktop.org/wiki/ClipboardManager/
 
 use std::{
-    borrow::Cow,
     cell::RefCell,
     collections::{HashMap, hash_map::Entry},
     sync::{
@@ -47,8 +46,13 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
-use gpui::{ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
+
+use crate::linux::clipboard_formats::{
+    ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, URI_LIST_MIME_TYPE, file_list_item,
+    parse_gnome_copied_files, parse_uri_list,
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -78,7 +82,8 @@ x11rb::atom_manager! {
         TEXT_MIME_UNKNOWN: b"text/plain",
 
         // HTML: b"text/html",
-        // URI_LIST: b"text/uri-list",
+        URI_LIST: URI_LIST_MIME_TYPE.as_bytes(),
+        GNOME_COPIED_FILES: GNOME_COPIED_FILES_MIME_TYPE.as_bytes(),
 
         PNG__MIME: ImageFormat::mime_type(ImageFormat::Png ).as_bytes(),
         JPEG_MIME: ImageFormat::mime_type(ImageFormat::Jpeg).as_bytes(),
@@ -287,11 +292,9 @@ impl Inner {
         if self.is_owner(selection)? {
             let data = self.selection_of(selection).data.read();
             if let Some(data_list) = &*data {
-                for data in data_list {
-                    for format in formats {
-                        if *format == data.format {
-                            return Ok(data.clone());
-                        }
+                for format in formats {
+                    if let Some(data) = data_list.iter().find(|data| data.format == *format) {
+                        return Ok(data.clone());
                     }
                 }
             }
@@ -977,16 +980,33 @@ impl Clipboard {
         Ok(Self { inner: ctx })
     }
 
-    pub(crate) fn set_text(
+    /// Owns the selection, offering the item's file list as `text/uri-list` and
+    /// `x-special/gnome-copied-files`, and its text as `UTF8_STRING`.
+    pub(crate) fn set_item(
         &self,
-        message: Cow<'_, str>,
+        item: &ClipboardItem,
         selection: ClipboardKind,
         wait: WaitConfig,
     ) -> Result<()> {
-        let data = vec![ClipboardData {
-            bytes: message.into_owned().into_bytes(),
-            format: self.inner.atoms.UTF8_STRING,
-        }];
+        let offer = ClipboardOffer::new(item);
+        let atoms = &self.inner.atoms;
+        let mut data = Vec::with_capacity(3);
+        if let Some(uri_list) = offer.uri_list() {
+            data.push(ClipboardData {
+                bytes: uri_list.as_bytes().to_vec(),
+                format: atoms.URI_LIST,
+            });
+        }
+        if let Some(gnome_copied_files) = offer.gnome_copied_files() {
+            data.push(ClipboardData {
+                bytes: gnome_copied_files.as_bytes().to_vec(),
+                format: atoms.GNOME_COPIED_FILES,
+            });
+        }
+        data.push(ClipboardData {
+            bytes: offer.text().unwrap_or_default().as_bytes().to_vec(),
+            format: atoms.UTF8_STRING,
+        });
         self.inner.write(data, selection, wait)
     }
 
@@ -1020,31 +1040,40 @@ impl Clipboard {
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
+        let atoms = &self.inner.atoms;
         let image_entries = ImageFormat::iter()
             .map(|format| (self.image_format_atom(format), format))
             .collect::<Vec<_>>();
+        let file_list_format_atoms = [atoms.URI_LIST, atoms.GNOME_COPIED_FILES];
 
-        let text_format_atoms: &[Atom] = &[
-            self.inner.atoms.UTF8_STRING,
-            self.inner.atoms.UTF8_MIME_0,
-            self.inner.atoms.UTF8_MIME_1,
-            self.inner.atoms.STRING,
-            self.inner.atoms.TEXT,
-            self.inner.atoms.TEXT_MIME_UNKNOWN,
-        ];
-
-        // image formats first, as they are more specific, and read will return the first
-        // format that the contents can be converted to
-        let mut format_atoms = Vec::with_capacity(image_entries.len() + text_format_atoms.len());
+        let mut format_atoms = Vec::with_capacity(
+            file_list_format_atoms.len() + image_entries.len() + self.text_format_atoms().len(),
+        );
+        format_atoms.extend_from_slice(&file_list_format_atoms);
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
-        format_atoms.extend_from_slice(text_format_atoms);
+        format_atoms.extend_from_slice(&self.text_format_atoms());
 
-        let result = self.inner.read(&format_atoms, selection)?;
+        let mut result = self.inner.read(&format_atoms, selection)?;
 
         log::trace!(
             "read clipboard as format {:?}",
             self.inner.atom_name(result.format)
         );
+
+        if file_list_format_atoms.contains(&result.format) {
+            if let Some(paths) = self.file_paths(&result) {
+                let text = self
+                    .inner
+                    .read(&self.text_format_atoms(), selection)
+                    .and_then(|data| self.decode_text(data))
+                    .ok();
+                return Ok(file_list_item(paths, text));
+            }
+            // The file list names something other than local files, so read the rest.
+            result = self
+                .inner
+                .read(&format_atoms[file_list_format_atoms.len()..], selection)?;
+        }
 
         for (format_atom, image_format) in image_entries {
             if result.format == format_atom {
@@ -1058,14 +1087,35 @@ impl Clipboard {
             }
         }
 
-        let text = if result.format == self.inner.atoms.STRING {
-            // ISO Latin-1
-            // See: https://stackoverflow.com/questions/28169745/what-are-the-options-to-convert-iso-8859-1-latin-1-to-a-string-utf-8
-            result.bytes.into_iter().map(|c| c as char).collect()
+        Ok(ClipboardItem::new_string(self.decode_text(result)?))
+    }
+
+    fn text_format_atoms(&self) -> [Atom; 6] {
+        let atoms = &self.inner.atoms;
+        [
+            atoms.UTF8_STRING,
+            atoms.UTF8_MIME_0,
+            atoms.UTF8_MIME_1,
+            atoms.STRING,
+            atoms.TEXT,
+            atoms.TEXT_MIME_UNKNOWN,
+        ]
+    }
+
+    fn decode_text(&self, data: ClipboardData) -> Result<String> {
+        if data.format == self.inner.atoms.STRING {
+            Ok(data.bytes.into_iter().map(|c| c as char).collect())
         } else {
-            String::from_utf8(result.bytes).map_err(|_| Error::ConversionFailure)?
-        };
-        Ok(ClipboardItem::new_string(text))
+            String::from_utf8(data.bytes).map_err(|_| Error::ConversionFailure)
+        }
+    }
+
+    fn file_paths(&self, file_list: &ClipboardData) -> Option<ExternalPaths> {
+        if file_list.format == self.inner.atoms.URI_LIST {
+            parse_uri_list(&file_list.bytes)
+        } else {
+            parse_gnome_copied_files(&file_list.bytes)
+        }
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {

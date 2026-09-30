@@ -12,14 +12,18 @@ use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection
 
 use crate::linux::{
     WaylandClientStatePtr,
+    clipboard_formats::{
+        ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, URI_LIST_MIME_TYPE, file_list_item,
+        parse_gnome_copied_files, parse_uri_list,
+    },
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
-use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
-pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
+pub(crate) const FILE_LIST_MIME_TYPE: &str = URI_LIST_MIME_TYPE;
 
 /// Text mime types that we'll accept from other programs.
 pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
@@ -30,14 +34,52 @@ pub(crate) struct Clipboard {
     self_mime: String,
 
     // Internal clipboard
-    contents: Option<ClipboardItem>,
-    primary_contents: Option<ClipboardItem>,
+    contents: Option<OwnedSelection>,
+    primary_contents: Option<OwnedSelection>,
 
     // External clipboard
     cached_read: Option<ClipboardItem>,
     current_offer: Option<DataOffer<WlDataOffer>>,
     cached_primary_read: Option<ClipboardItem>,
     current_primary_offer: Option<DataOffer<ZwpPrimarySelectionOfferV1>>,
+}
+
+/// A selection that GPUI owns, with the representations it offers to other programs.
+struct OwnedSelection {
+    item: ClipboardItem,
+    offer: ClipboardOffer,
+}
+
+impl OwnedSelection {
+    fn new(item: ClipboardItem) -> Self {
+        let offer = ClipboardOffer::new(&item);
+        Self { item, offer }
+    }
+
+    fn bytes_for(&self, mime_type: &str) -> Option<&[u8]> {
+        let representation = match mime_type {
+            URI_LIST_MIME_TYPE => self.offer.uri_list(),
+            GNOME_COPIED_FILES_MIME_TYPE => self.offer.gnome_copied_files(),
+            _ if TEXT_MIME_TYPES.contains(&mime_type) => self.offer.text(),
+            _ => None,
+        };
+        representation.map(str::as_bytes)
+    }
+
+    /// The mime types offered to other programs, in preference order.
+    fn mime_types(&self) -> Vec<&'static str> {
+        let mut mime_types = Vec::new();
+        if self.offer.uri_list().is_some() {
+            mime_types.push(URI_LIST_MIME_TYPE);
+        }
+        if self.offer.gnome_copied_files().is_some() {
+            mime_types.push(GNOME_COPIED_FILES_MIME_TYPE);
+        }
+        if self.offer.text().is_some() {
+            mime_types.extend(TEXT_MIME_TYPES);
+        }
+        mime_types
+    }
 }
 
 pub(crate) trait ReceiveData {
@@ -98,7 +140,7 @@ impl<T: ReceiveData> DataOffer<T> {
         }
     }
 
-    fn read_text(&self, connection: &Connection) -> Option<ClipboardItem> {
+    fn read_string(&self, connection: &Connection) -> Option<String> {
         let mime_type = self.mime_types.iter().find(|&mime_type| {
             ALLOWED_TEXT_MIME_TYPES
                 .iter()
@@ -116,8 +158,29 @@ impl<T: ReceiveData> DataOffer<T> {
         // Normalize the text to unix line endings, otherwise
         // copying from eg: firefox inserts a lot of blank
         // lines, and that is super annoying.
-        let result = text_content.replace("\r\n", "\n");
-        Some(ClipboardItem::new_string(result))
+        Some(text_content.replace("\r\n", "\n"))
+    }
+
+    fn read_file_paths(&self, connection: &Connection) -> Option<ExternalPaths> {
+        if self.has_mime_type(URI_LIST_MIME_TYPE) {
+            let bytes = self.read_bytes(connection, URI_LIST_MIME_TYPE)?;
+            parse_uri_list(&bytes)
+        } else if self.has_mime_type(GNOME_COPIED_FILES_MIME_TYPE) {
+            let bytes = self.read_bytes(connection, GNOME_COPIED_FILES_MIME_TYPE)?;
+            parse_gnome_copied_files(&bytes)
+        } else {
+            None
+        }
+    }
+
+    /// Reads the offer as a file list, then text, then an image.
+    fn read_item(&self, connection: &Connection) -> Option<ClipboardItem> {
+        if let Some(paths) = self.read_file_paths(connection) {
+            return Some(file_list_item(paths, self.read_string(connection)));
+        }
+        self.read_string(connection)
+            .map(ClipboardItem::new_string)
+            .or_else(|| self.read_image(connection))
     }
 
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
@@ -158,12 +221,20 @@ impl Clipboard {
         }
     }
 
-    pub fn set(&mut self, item: ClipboardItem) {
-        self.contents = Some(item);
+    /// Owns the clipboard contents and returns the mime types to offer for them.
+    pub fn set(&mut self, item: ClipboardItem) -> Vec<&'static str> {
+        let contents = OwnedSelection::new(item);
+        let mime_types = contents.mime_types();
+        self.contents = Some(contents);
+        mime_types
     }
 
-    pub fn set_primary(&mut self, item: ClipboardItem) {
-        self.primary_contents = Some(item);
+    /// Owns the primary selection contents and returns the mime types to offer for them.
+    pub fn set_primary(&mut self, item: ClipboardItem) -> Vec<&'static str> {
+        let contents = OwnedSelection::new(item);
+        let mime_types = contents.mime_types();
+        self.primary_contents = Some(contents);
+        mime_types
     }
 
     pub fn set_offer(&mut self, data_offer: Option<DataOffer<WlDataOffer>>) {
@@ -180,19 +251,23 @@ impl Clipboard {
         self.self_mime.clone()
     }
 
-    pub fn send(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self.contents.as_ref().and_then(|contents| contents.text()) {
-            self.send_bytes(fd, text.as_bytes().to_owned());
+    pub fn send(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self
+            .contents
+            .as_ref()
+            .and_then(|contents| contents.bytes_for(&mime_type))
+        {
+            self.send_bytes(fd, bytes.to_owned());
         }
     }
 
-    pub fn send_primary(&self, _mime_type: String, fd: OwnedFd) {
-        if let Some(text) = self
+    pub fn send_primary(&self, mime_type: String, fd: OwnedFd) {
+        if let Some(bytes) = self
             .primary_contents
             .as_ref()
-            .and_then(|contents| contents.text())
+            .and_then(|contents| contents.bytes_for(&mime_type))
         {
-            self.send_bytes(fd, text.as_bytes().to_owned());
+            self.send_bytes(fd, bytes.to_owned());
         }
     }
 
@@ -203,12 +278,10 @@ impl Clipboard {
         }
 
         if offer.has_mime_type(&self.self_mime) {
-            return self.contents.clone();
+            return self.contents.as_ref().map(|contents| contents.item.clone());
         }
 
-        let item = offer
-            .read_text(&self.connection)
-            .or_else(|| offer.read_image(&self.connection))?;
+        let item = offer.read_item(&self.connection)?;
 
         self.cached_read = Some(item.clone());
         Some(item)
@@ -221,12 +294,13 @@ impl Clipboard {
         }
 
         if offer.has_mime_type(&self.self_mime) {
-            return self.primary_contents.clone();
+            return self
+                .primary_contents
+                .as_ref()
+                .map(|contents| contents.item.clone());
         }
 
-        let item = offer
-            .read_text(&self.connection)
-            .or_else(|| offer.read_image(&self.connection))?;
+        let item = offer.read_item(&self.connection)?;
 
         self.cached_primary_read = Some(item.clone());
         Some(item)

@@ -85,12 +85,13 @@ use super::{
 use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
     SCROLL_LINES, capslock_from_xkb,
+    clipboard_formats::uri_list,
     compose::{ComposeText, feed_compose},
     cursor_style_to_icon_names, get_xkb_compose_state, is_within_click_distance,
     keystroke_from_xkb, modifiers_from_xkb, new_xkb_context, open_uri_internal,
     read_fd_with_timeout, reveal_path_internal,
     wayland::{
-        clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
+        clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE},
         cursor::Cursor,
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
@@ -483,15 +484,7 @@ pub(crate) struct ExternalDrag {
 }
 
 fn file_uri_list(paths: &FileDragPaths) -> String {
-    paths
-        .entries()
-        .iter()
-        .filter_map(|(path, _)| Url::from_file_path(path).ok())
-        .fold(String::new(), |mut list, url| {
-            list.push_str(url.as_str());
-            list.push_str("\r\n");
-            list
-        })
+    uri_list(paths.entries().iter().map(|(path, _)| path.as_path()))
 }
 
 pub struct ClickState {
@@ -1315,7 +1308,7 @@ impl LinuxClient for WaylandClient {
             return;
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            state.clipboard.set_primary(item);
+            let mime_types = state.clipboard.set_primary(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
@@ -1323,7 +1316,7 @@ impl LinuxClient for WaylandClient {
                 return;
             };
             let data_source = primary_selection_manager.create_source(&state.globals.qh, ());
-            for mime_type in TEXT_MIME_TYPES {
+            for mime_type in mime_types {
                 data_source.offer(mime_type.to_string());
             }
             data_source.offer(state.clipboard.self_mime());
@@ -1340,7 +1333,7 @@ impl LinuxClient for WaylandClient {
             return;
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            state.clipboard.set(item);
+            let mime_types = state.clipboard.set(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
@@ -1349,7 +1342,7 @@ impl LinuxClient for WaylandClient {
             };
             let data_source = data_device_manager
                 .create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
-            for mime_type in TEXT_MIME_TYPES {
+            for mime_type in mime_types {
                 data_source.offer(mime_type.to_string());
             }
             data_source.offer(state.clipboard.self_mime());

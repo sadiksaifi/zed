@@ -1,4 +1,6 @@
 #[cfg(any(feature = "wayland", feature = "x11"))]
+mod clipboard_formats;
+#[cfg(any(feature = "wayland", feature = "x11"))]
 mod compose;
 mod dispatcher;
 mod headless;
