@@ -77,6 +77,7 @@ use xkbcommon::xkb::{self, KEYMAP_COMPILE_NO_FLAGS, Keycode};
 
 use super::{
     display::WaylandDisplay,
+    scroll_gesture::ScrollGesture,
     window::{ImeInput, WaylandWindowStatePtr},
 };
 
@@ -353,6 +354,8 @@ pub(crate) struct WaylandClientState {
     vertical_modifier: f32,
     horizontal_modifier: f32,
     scroll_event_received: bool,
+    scroll_stopped: bool,
+    scroll_gesture: ScrollGesture,
     enter_token: Option<()>,
     button_pressed: Option<MouseButton>,
     mouse_focused_window: Option<WaylandWindowStatePtr>,
@@ -1044,6 +1047,8 @@ impl WaylandClient {
             },
             capslock: Capslock { on: false },
             scroll_event_received: false,
+            scroll_stopped: false,
+            scroll_gesture: ScrollGesture::default(),
             axis_source: AxisSource::Wheel,
             mouse_location: None,
             continuous_scroll_delta: None,
@@ -2242,8 +2247,19 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
             }
             wl_pointer::Event::Leave { .. } => {
                 if let Some(focused_window) = state.mouse_focused_window.clone() {
+                    let position = state.mouse_location.unwrap();
+                    // The compositor sends no `axis_stop` once the pointer has left, so end
+                    // an unfinished touchpad scroll here.
+                    let scroll_ended = state.scroll_gesture.end().then(|| {
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(Point::default()),
+                            modifiers: state.modifiers,
+                            touch_phase: TouchPhase::Ended,
+                        })
+                    });
                     let input = PlatformInput::MouseExited(MouseExitEvent {
-                        position: state.mouse_location.unwrap(),
+                        position,
                         pressed_button: state.button_pressed,
                         modifiers: state.modifiers,
                     });
@@ -2251,8 +2267,15 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                     state.mouse_location = None;
                     state.button_pressed = None;
                     state.cursor_hidden_window = None;
+                    state.scroll_event_received = false;
+                    state.scroll_stopped = false;
+                    state.continuous_scroll_delta = None;
+                    state.discrete_scroll_delta = None;
 
                     drop(state);
+                    if let Some(scroll_ended) = scroll_ended {
+                        focused_window.handle_input(scroll_ended);
+                    }
                     focused_window.handle_input(input);
                     focused_window.set_hovered(false);
                 }
@@ -2492,32 +2515,49 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                     _ => unreachable!(),
                 }
             }
+            wl_pointer::Event::AxisStop { .. } => {
+                state.scroll_event_received = true;
+                state.scroll_stopped = true;
+            }
             wl_pointer::Event::Frame => {
                 if state.scroll_event_received {
                     state.scroll_event_received = false;
                     let continuous = state.continuous_scroll_delta.take();
                     let discrete = state.discrete_scroll_delta.take();
+                    let stopped = std::mem::take(&mut state.scroll_stopped);
+                    let Some(window) = state.mouse_focused_window.clone() else {
+                        return;
+                    };
+                    let position = state.mouse_location.unwrap();
+                    let modifiers = state.modifiers;
+
+                    let mut inputs = SmallVec::<[PlatformInput; 2]>::new();
                     if let Some(continuous) = continuous {
-                        if let Some(window) = state.mouse_focused_window.clone() {
-                            let input = PlatformInput::ScrollWheel(ScrollWheelEvent {
-                                position: state.mouse_location.unwrap(),
-                                delta: ScrollDelta::Pixels(continuous),
-                                modifiers: state.modifiers,
-                                touch_phase: TouchPhase::Moved,
-                            });
-                            drop(state);
-                            window.handle_input(input);
-                        }
-                    } else if let Some(discrete) = discrete
-                        && let Some(window) = state.mouse_focused_window.clone()
-                    {
-                        let input = PlatformInput::ScrollWheel(ScrollWheelEvent {
-                            position: state.mouse_location.unwrap(),
+                        let axis_source = state.axis_source;
+                        inputs.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(continuous),
+                            modifiers,
+                            touch_phase: state.scroll_gesture.scrolled(axis_source),
+                        }));
+                    } else if let Some(discrete) = discrete {
+                        inputs.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position,
                             delta: ScrollDelta::Lines(discrete),
-                            modifiers: state.modifiers,
+                            modifiers,
                             touch_phase: TouchPhase::Moved,
-                        });
-                        drop(state);
+                        }));
+                    }
+                    if stopped && state.scroll_gesture.end() {
+                        inputs.push(PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(Point::default()),
+                            modifiers,
+                            touch_phase: TouchPhase::Ended,
+                        }));
+                    }
+                    drop(state);
+                    for input in inputs {
                         window.handle_input(input);
                     }
                 }
