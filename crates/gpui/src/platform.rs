@@ -245,6 +245,11 @@ pub trait Platform: 'static {
         None
     }
 
+    /// Returns which see-through window backgrounds this platform can show.
+    fn window_background_support(&self) -> WindowBackgroundSupport {
+        WindowBackgroundSupport::ALL
+    }
+
     fn open_url(&self, url: &str);
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>);
     fn register_url_scheme(&self, url: &str) -> Task<Result<()>>;
@@ -2476,6 +2481,32 @@ pub enum WindowBackgroundAppearance {
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.
     MicaAltBackdrop,
+}
+
+/// Which see-through window backgrounds the platform can show in the current session.
+///
+/// A window may request a [`WindowBackgroundAppearance`] the platform cannot show; it then
+/// renders over an undefined backdrop, so query this before relying on one.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct WindowBackgroundSupport {
+    /// Whether [`WindowBackgroundAppearance::Transparent`] shows the content behind the window.
+    pub transparent: bool,
+    /// Whether [`WindowBackgroundAppearance::Blurred`] blurs the content behind the window.
+    pub blurred: bool,
+}
+
+impl WindowBackgroundSupport {
+    /// Transparent and blurred window backgrounds are both supported.
+    pub const ALL: Self = Self {
+        transparent: true,
+        blurred: true,
+    };
+
+    /// Only opaque window backgrounds are supported.
+    pub const NONE: Self = Self {
+        transparent: false,
+        blurred: false,
+    };
 }
 
 /// The text rendering mode to use for drawing glyphs.

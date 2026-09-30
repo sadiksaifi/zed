@@ -50,8 +50,8 @@ use crate::{
     PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
     RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
     Subscription, SvgRenderer, SystemNotification, SystemNotificationResponse, Task,
-    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
-    WindowHandle, WindowId, WindowInvalidator,
+    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowBackgroundSupport,
+    WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -1512,6 +1512,18 @@ impl App {
     /// Returns the window button layout configuration when supported.
     pub fn button_layout(&self) -> Option<WindowButtonLayout> {
         self.platform.button_layout()
+    }
+
+    /// Returns which see-through window backgrounds the platform can show in this session, such
+    /// as whether a compositor is running to make
+    /// [`WindowBackgroundAppearance::Transparent`](crate::WindowBackgroundAppearance::Transparent)
+    /// show the content behind a window.
+    ///
+    /// macOS supports both. On Wayland, transparency is always supported and blur needs the
+    /// compositor's KDE blur protocol. On X11, transparency needs a compositing manager at
+    /// startup and blur is unsupported.
+    pub fn window_background_support(&self) -> WindowBackgroundSupport {
+        self.platform.window_background_support()
     }
 
     /// Reads data from the platform clipboard.

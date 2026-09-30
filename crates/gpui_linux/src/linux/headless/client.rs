@@ -112,6 +112,10 @@ impl LinuxClient for HeadlessClient {
         "headless"
     }
 
+    fn window_background_support(&self) -> gpui::WindowBackgroundSupport {
+        gpui::WindowBackgroundSupport::NONE
+    }
+
     fn set_cursor_style(&self, _style: CursorStyle) {}
 
     fn open_uri(&self, _uri: &str) {}

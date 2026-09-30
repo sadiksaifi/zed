@@ -63,7 +63,8 @@ use gpui::{
     AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay, PlatformInput,
     PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
-    TouchPhase, WindowButtonLayout, WindowParams, WindowVisibility, point, px,
+    TouchPhase, WindowBackgroundSupport, WindowButtonLayout, WindowParams, WindowVisibility, point,
+    px,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 
@@ -197,6 +198,7 @@ pub struct X11ClientState {
     xkb_context: xkbc::Context,
     pub(crate) xcb_connection: Rc<XCBConnection>,
     xkb_device_id: i32,
+    compositor_present: bool,
     client_side_decorations_supported: bool,
     pub(crate) x_root_index: usize,
     pub(crate) resource_database: Database,
@@ -550,6 +552,7 @@ impl X11Client {
             xkb_context,
             xcb_connection,
             xkb_device_id,
+            compositor_present,
             client_side_decorations_supported,
             x_root_index,
             resource_database,
@@ -1557,6 +1560,15 @@ impl X11Client {
 impl LinuxClient for X11Client {
     fn compositor_name(&self) -> &'static str {
         "X11"
+    }
+
+    fn window_background_support(&self) -> WindowBackgroundSupport {
+        // Without a compositing manager, the X server draws transparent pixels as black.
+        // No X11 compositor offers a standard blur request.
+        WindowBackgroundSupport {
+            transparent: self.0.borrow().compositor_present,
+            blurred: false,
+        }
     }
 
     fn with_common<R>(&self, f: impl FnOnce(&mut LinuxCommon) -> R) -> R {

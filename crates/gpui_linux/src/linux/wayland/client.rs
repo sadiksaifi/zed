@@ -101,7 +101,8 @@ use gpui::{
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
     PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
-    Size, TouchPhase, WindowButtonLayout, WindowKind, WindowParams, point, profiler, px, size,
+    Size, TouchPhase, WindowBackgroundSupport, WindowButtonLayout, WindowKind, WindowParams, point,
+    profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -1375,6 +1376,15 @@ impl LinuxClient for WaylandClient {
 
     fn compositor_name(&self) -> &'static str {
         "Wayland"
+    }
+
+    fn window_background_support(&self) -> WindowBackgroundSupport {
+        // Wayland compositors always composite surfaces, so a transparent surface shows what
+        // is behind it. Blur needs the KDE blur protocol.
+        WindowBackgroundSupport {
+            transparent: true,
+            blurred: self.0.borrow().globals.blur_manager.is_some(),
+        }
     }
 
     fn window_identifier(&self) -> impl Future<Output = Option<WindowIdentifier>> + Send + 'static {

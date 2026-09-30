@@ -36,7 +36,7 @@ use gpui::{
     DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowButtonLayout, WindowParams,
+    WindowBackgroundSupport, WindowButtonLayout, WindowParams,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{Pixels, Point, px};
@@ -58,6 +58,7 @@ const FILE_PICKER_PORTAL_MISSING: &str =
 
 pub(crate) trait LinuxClient {
     fn compositor_name(&self) -> &'static str;
+    fn window_background_support(&self) -> WindowBackgroundSupport;
     fn with_common<R>(&self, f: impl FnOnce(&mut LinuxCommon) -> R) -> R;
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout>;
     fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>>;
@@ -790,6 +791,10 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn button_layout(&self) -> Option<WindowButtonLayout> {
         Some(self.inner.with_common(|common| common.button_layout))
+    }
+
+    fn window_background_support(&self) -> WindowBackgroundSupport {
+        self.inner.window_background_support()
     }
 
     fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
