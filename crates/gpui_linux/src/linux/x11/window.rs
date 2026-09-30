@@ -442,6 +442,26 @@ where
         .with_context(failure_context)
 }
 
+/// Sets WM_CLASS, which window managers match against desktop entries, to the application ID.
+fn set_wm_class(xcb: &XCBConnection, x_window: xproto::Window, app_id: &str) -> anyhow::Result<()> {
+    let mut data = Vec::with_capacity(app_id.len() * 2 + 2);
+    data.extend(app_id.bytes()); // instance https://unix.stackexchange.com/a/494170
+    data.push(b'\0');
+    data.extend(app_id.bytes()); // class
+    data.push(b'\0');
+
+    check_reply(
+        || "X11 ChangeProperty8 for WM_CLASS failed.",
+        xcb.change_property8(
+            xproto::PropMode::REPLACE,
+            x_window,
+            xproto::AtomEnum::WM_CLASS,
+            xproto::AtomEnum::STRING,
+            &data,
+        ),
+    )
+}
+
 /// Sets or clears the ICCCM WM_HINTS urgency flag, preserving the other hints.
 ///
 /// Clearing when the flag isn't set is skipped: writing it back would create a
@@ -651,6 +671,11 @@ impl X11WindowState {
                         title.as_bytes(),
                     ),
                 )?;
+            }
+
+            // Window managers read WM_CLASS when the window is mapped, so it must be set first.
+            if let Some(app_id) = params.app_id.as_deref() {
+                set_wm_class(xcb, x_window, app_id)?;
             }
 
             if params.kind == WindowKind::PopUp {
@@ -1654,23 +1679,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn set_app_id(&mut self, app_id: &str) {
-        let mut data = Vec::with_capacity(app_id.len() * 2 + 2);
-        data.extend(app_id.bytes()); // instance https://unix.stackexchange.com/a/494170
-        data.push(b'\0');
-        data.extend(app_id.bytes()); // class
-        data.push(b'\0');
-
-        check_reply(
-            || "X11 ChangeProperty8 for WM_CLASS failed.",
-            self.0.xcb.change_property8(
-                xproto::PropMode::REPLACE,
-                self.0.x_window,
-                xproto::AtomEnum::WM_CLASS,
-                xproto::AtomEnum::STRING,
-                &data,
-            ),
-        )
-        .log_err();
+        set_wm_class(&self.0.xcb, self.0.x_window, app_id).log_err();
     }
 
     fn map_window(&mut self) -> anyhow::Result<()> {
