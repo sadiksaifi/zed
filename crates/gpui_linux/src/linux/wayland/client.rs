@@ -687,7 +687,7 @@ impl WaylandClientStatePtr {
             let layout_name = keymap.layout_get_name(layout_idx);
             let changed = layout_name != state.keyboard_layout.name();
             if changed {
-                state.keyboard_layout = LinuxKeyboardLayout::new(layout_name.to_string().into());
+                state.keyboard_layout = LinuxKeyboardLayout::from_xkb(keymap_state);
             }
             changed
         } else {

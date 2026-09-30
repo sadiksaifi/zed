@@ -1,6 +1,6 @@
 use collections::HashMap;
 
-use crate::{KeybindingKeystroke, Keystroke};
+use crate::{KeybindingKeystroke, Keystroke, SharedString};
 
 /// A trait for platform-specific keyboard layouts
 pub trait PlatformKeyboardLayout {
@@ -8,6 +8,16 @@ pub trait PlatformKeyboardLayout {
     fn id(&self) -> &str;
     /// Get the keyboard layout display name
     fn name(&self) -> &str;
+    /// The `(base, shifted)` key pairs of the active layout, spelled as [`Keystroke::key`] is
+    /// spelled for key-down events with Control held, without and with Shift.
+    ///
+    /// A pair is listed when both keys are single characters that differ and the shifted key has
+    /// no case, so GPUI reports it without the Shift modifier (Shift+1 arrives as `!` on a US
+    /// layout). Each base key appears at most once. Returns `None` when the platform does not
+    /// report the table.
+    fn shift_pairs(&self) -> Option<&[(SharedString, SharedString)]> {
+        None
+    }
 }
 
 /// A trait for platform-specific keyboard mappings
