@@ -2804,7 +2804,9 @@ impl Window {
     ///
     /// `bounds` are relative to the top-left corner of the display named by `display_id`, or of
     /// the primary display when `display_id` is `None`, matching [`WindowOptions::window_bounds`].
-    /// Platforms without programmatic window placement ignore the request.
+    /// Wayland applies only the size because the compositor controls placement and output selection.
+    /// X11 cannot move an existing window between separate screens. Other platforms without
+    /// programmatic window placement ignore the request.
     pub fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
         self.platform_window.set_bounds(bounds, display_id);
     }

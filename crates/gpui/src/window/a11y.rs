@@ -674,53 +674,6 @@ impl A11yNodeBuilder {
         }
         update
     }
-
-    /// Accesskit panics on invalid [`TreeUpdate`]s. This function defensively
-    /// checks invariants that accesskit panics on, and tries to fix them.
-    #[cfg(test)]
-    fn repair_tree_update(mut update: TreeUpdate) -> TreeUpdate {
-        let node_ids: FxHashSet<NodeId> = update.nodes.iter().map(|(id, _)| *id).collect();
-
-        // Focus must point to a node in the tree.
-        if !node_ids.contains(&update.focus) {
-            log::error!(
-                "a11y: Focused node {:?} is not in the tree ({} nodes). \
-                 Falling back to root. This is a bug in the a11y tree builder.",
-                update.focus,
-                update.nodes.len()
-            );
-            update.focus = ROOT_NODE_ID;
-        }
-
-        // Every child reference must point to a node in the update.
-        for (id, node) in &mut update.nodes {
-            let has_invalid_child = node
-                .children()
-                .iter()
-                .any(|child_id| !node_ids.contains(child_id));
-            if has_invalid_child {
-                let children = node.children();
-                let invalid_count = children
-                    .iter()
-                    .filter(|child_id| !node_ids.contains(child_id))
-                    .count();
-                log::error!(
-                    "a11y: Node {:?} references {} children not present in the tree. \
-                     Stripping invalid child references.",
-                    id,
-                    invalid_count
-                );
-                let valid: Vec<NodeId> = children
-                    .iter()
-                    .copied()
-                    .filter(|child_id| node_ids.contains(child_id))
-                    .collect();
-                node.set_children(valid);
-            }
-        }
-
-        update
-    }
 }
 
 #[cfg(test)]

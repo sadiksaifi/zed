@@ -55,7 +55,6 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_web): report unsupported window background effects`
 - `fix(gpui_linux): retain held modifiers when the other side releases`
 - `fix(gpui_linux): honor display backend feature gates`
-- `feat(gpui): move and resize windows with set_bounds`
 - `feat(gpui): drag files with their own icons`
 - `feat(gpui): drag files as a caller-drawn image`
 - `feat(gpui): expose native interactive resize state`
@@ -73,6 +72,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 - `fix(gpui_linux): expose bounded exact selection text and typed writes`
 - `fix(gpui_linux): bound nonblocking outgoing Wayland clipboard transfers`
+
+- `feat(gpui): move and resize windows with set_bounds`
 
 ## Monthly rebase
 
@@ -126,6 +127,12 @@ cargo clippy -p gpui_linux --all-targets --no-default-features -- -D warnings
 
 The `gpui_wgpu` headless renderer tests need a GPU adapter. Without a GPU, Mesa lavapipe provides a
 software Vulkan adapter.
+
+On Linux, `Window::set_bounds` moves and resizes X11 windows on their existing screen, honoring
+the scale factor and updating fixed-size hints for non-resizable windows. Moving an existing
+X11 window between separate screens is unsupported and logs a warning. Wayland applies only
+the size through the existing resize path; the compositor controls placement and output
+selection. Headless windows update their stored bounds, and test windows also record requests.
 
 Wasm check, matching `.github/workflows/run_tests.yml`:
 

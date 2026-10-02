@@ -39,8 +39,8 @@ use crate::linux::{
 };
 use gpui::MouseButton;
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
-    Modifiers, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DisplayId, ExternalDragPayload,
+    GpuSpecs, Modifiers, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
     PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
     ResizeEdge, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
     WindowControlArea, WindowControls, WindowDecorations, WindowKind, WindowParams,
@@ -1845,6 +1845,12 @@ impl PlatformWindow for WaylandWindow {
             .executor
             .spawn(async move { state_ptr.resize(size) })
             .detach();
+    }
+
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, _display_id: Option<DisplayId>) {
+        // Wayland leaves top-level placement and output selection to the compositor. Reuse the
+        // resize path so client geometry, decoration insets, and popup configuration stay consistent.
+        self.resize(bounds.size);
     }
 
     fn scale_factor(&self) -> f32 {

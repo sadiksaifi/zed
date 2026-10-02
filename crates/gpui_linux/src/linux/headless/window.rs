@@ -108,6 +108,10 @@ impl PlatformWindow for HeadlessWindow {
         self.0.borrow_mut().bounds.size = size;
     }
 
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, _display_id: Option<DisplayId>) {
+        self.0.borrow_mut().bounds = bounds;
+    }
+
     fn scale_factor(&self) -> f32 {
         1.0
     }

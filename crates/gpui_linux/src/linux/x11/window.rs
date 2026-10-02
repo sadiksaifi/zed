@@ -4,11 +4,11 @@ use x11rb::connection::RequestConnection;
 use crate::linux::{TitlebarDoubleClickAction, X11ClientStatePtr};
 use gpui::MouseButton;
 use gpui::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge,
-    ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowControls, WindowDecorations, WindowKind, WindowParams,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, DisplayId, ForegroundExecutor, GpuSpecs,
+    Modifiers, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    ResizeEdge, ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowControls, WindowDecorations, WindowKind, WindowParams,
     WindowVisibility, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
@@ -1700,6 +1700,43 @@ impl PlatformWindow for X11Window {
                 &xproto::ConfigureWindowAux::new()
                     .width(width)
                     .height(height),
+            ),
+        )
+        .log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+        let state = self.0.state.borrow();
+        let Some(client) = state.client.get_client() else {
+            return;
+        };
+        let display_id =
+            display_id.unwrap_or_else(|| DisplayId::new(client.0.borrow().x_root_index as u64));
+        // X11 displays are separate root windows here. An existing window cannot move between
+        // roots without recreation, so reject that request instead of positioning on the wrong root.
+        if display_id != state.display.id() {
+            log::warn!("X11 set_bounds cannot move a window to another screen");
+            return;
+        }
+        let bounds = bounds.to_device_pixels(state.scale_factor);
+        let origin = bounds.origin;
+        let size = bounds.size;
+        if !state.size_limits.is_resizable {
+            state
+                .size_limits
+                .set_normal_hints(&self.0.xcb, self.0.x_window, size, state.scale_factor)
+                .log_err();
+        }
+        check_reply(
+            || "X11 ConfigureWindow failed for set_bounds",
+            self.0.xcb.configure_window(
+                self.0.x_window,
+                &xproto::ConfigureWindowAux::new()
+                    .x(origin.x.0)
+                    .y(origin.y.0)
+                    .width(size.width.0.max(1) as u32)
+                    .height(size.height.0.max(1) as u32),
             ),
         )
         .log_err();
