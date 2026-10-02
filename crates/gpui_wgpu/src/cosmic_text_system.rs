@@ -418,7 +418,9 @@ impl CosmicTextSystemState {
                 "Segoe Fluent Icons",
             ];
 
+            let is_known_emoji_font = check_is_known_emoji_font(&postscript_name);
             if font.as_swash().charmap().map('m') == 0
+                && !is_known_emoji_font
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
                 self.font_system.db_mut().remove_face(font.id());
@@ -430,7 +432,7 @@ impl CosmicTextSystemState {
             self.loaded_fonts.push(LoadedFont {
                 font,
                 features: cosmic_features.clone(),
-                is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                is_known_emoji_font,
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
@@ -1220,6 +1222,43 @@ mod tests {
             Cow::Borrowed(include_bytes!("../../../assets/fonts/lilex/Lilex-Bold.ttf")),
         ])?;
         assert_eq!(text_system.all_font_names(), ["IBM Plex Sans", "Lilex"]);
+        Ok(())
+    }
+
+    #[test]
+    fn loading_emoji_font_preserves_emoji_glyphs_and_family() -> Result<()> {
+        let text_system = text_system()?;
+        text_system.add_fonts(vec![Cow::Borrowed(include_bytes!(
+            "../../../assets/fonts/noto-color-emoji/NotoColorEmoji-Subset.ttf"
+        ))])?;
+
+        let emoji_font_id = text_system.font_id(&gpui::font("Noto Color Emoji"))?;
+        assert!(text_system.glyph_for_char(emoji_font_id, 'm').is_none());
+        assert!(
+            text_system
+                .glyph_for_char(emoji_font_id, '\u{1f600}')
+                .is_some()
+        );
+        assert!(
+            text_system
+                .all_font_names()
+                .contains(&"Noto Color Emoji".to_owned()),
+            "font catalog classification must not remove emoji families"
+        );
+
+        let text = "\u{1f600}";
+        let layout = text_system.layout_line(
+            text,
+            gpui::px(18.0),
+            &[FontRun {
+                len: text.len(),
+                font_id: emoji_font_id,
+            }],
+        );
+        assert_eq!(layout.runs.len(), 1);
+        assert_eq!(layout.runs[0].font_id, emoji_font_id);
+        assert!(!layout.runs[0].glyphs.is_empty());
+        assert!(layout.runs[0].glyphs.iter().all(|glyph| glyph.is_emoji));
         Ok(())
     }
 
