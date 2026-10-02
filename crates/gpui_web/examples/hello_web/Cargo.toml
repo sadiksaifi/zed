@@ -39,6 +39,10 @@ name = "queue_test"
 path = "queue_test.rs"
 
 [[bin]]
+name = "platform_test"
+path = "platform_test.rs"
+
+[[bin]]
 name = "dynamic_fonts"
 path = "dynamic_fonts.rs"
 

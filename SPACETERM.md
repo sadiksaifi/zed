@@ -52,6 +52,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): keep Latin letters distinct from shortcut punctuation`
 - `feat(gpui): retain native display ownership for exported window parents`
 - `feat(gpui): offer HTML clipboard alternates on Linux`
+- `fix(gpui_web): report unsupported window background effects`
 
 ## Monthly rebase
 

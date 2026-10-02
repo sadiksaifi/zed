@@ -14,7 +14,7 @@ use gpui::{
     GestureTuning, Image, ImageFormat, Keymap, Menu, MenuItem, PathPromptOptions, Platform,
     PlatformDisplay, PlatformGestures, PlatformKeyboardLayout, PlatformKeyboardMapper,
     PlatformTextSystem, PlatformWindow, ScrollPhysics, Task, ThermalState, WindowAppearance,
-    WindowKind, WindowParams, popup::PopupNotSupportedError,
+    WindowBackgroundSupport, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_wgpu::{PreparedWebGraphics, WebBackendPreference, WgpuContext, wgpu};
 use std::{
@@ -437,6 +437,11 @@ impl Platform for WebPlatform {
                 Err(error)
             }
         }
+    }
+
+    fn window_background_support(&self) -> WindowBackgroundSupport {
+        // WebWindow configures an opaque canvas and ignores background appearance requests.
+        WindowBackgroundSupport::NONE
     }
 
     fn window_appearance(&self) -> WindowAppearance {
