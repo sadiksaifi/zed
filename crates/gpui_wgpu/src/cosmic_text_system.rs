@@ -811,7 +811,10 @@ impl CosmicTextSystemState {
 
             let shaped_glyph = ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),
-                position: point(glyph.x.into(), glyph.y.into()),
+                position: point(
+                    (glyph.x + glyph.font_size * glyph.x_offset).into(),
+                    (glyph.y - glyph.font_size * glyph.y_offset).into(),
+                ),
                 index: glyph.start,
                 is_emoji,
             };
@@ -1259,6 +1262,67 @@ mod tests {
         assert_eq!(layout.runs[0].font_id, emoji_font_id);
         assert!(!layout.runs[0].glyphs.is_empty());
         assert!(layout.runs[0].glyphs.iter().all(|glyph| glyph.is_emoji));
+        Ok(())
+    }
+
+    #[test]
+    fn layout_line_preserves_combining_mark_offsets_and_advances() -> Result<()> {
+        let text_system = text_system()?;
+        let font_id = text_system.font_id(&gpui::font("IBM Plex Sans"))?;
+        let text = "Q\u{301}x";
+
+        // IBM Plex Sans has 1000 units per em. Its Q advances 708 units, and
+        // the acute's mark anchor moves it -354 horizontally and +158 upwards.
+        for font_size in [20.0, 40.0] {
+            let scale = font_size / 1000.0;
+            let layout = text_system.layout_line(
+                text,
+                gpui::px(font_size),
+                &[FontRun {
+                    len: text.len(),
+                    font_id,
+                }],
+            );
+            assert_eq!(layout.runs.len(), 1);
+            assert_eq!(layout.runs[0].font_id, font_id);
+            let glyphs = &layout.runs[0].glyphs;
+            assert_eq!(glyphs.len(), 3);
+            assert_eq!(
+                glyphs.iter().map(|glyph| glyph.index).collect::<Vec<_>>(),
+                [0, 0, 3]
+            );
+            for (glyph, (horizontal, vertical)) in glyphs.iter().zip([
+                (0.0, 0.0),
+                (354.0 * scale, -158.0 * scale),
+                (708.0 * scale, 0.0),
+            ]) {
+                assert!(
+                    (glyph.position.x - gpui::px(horizontal)).abs() < gpui::px(0.001),
+                    "font_size={font_size}, glyph={glyph:?}"
+                );
+                assert!(
+                    (glyph.position.y - gpui::px(vertical)).abs() < gpui::px(0.001),
+                    "font_size={font_size}, glyph={glyph:?}"
+                );
+            }
+            assert!((layout.width - gpui::px(1215.0 * scale)).abs() < gpui::px(0.001));
+            let mut tops = Vec::new();
+            for glyph in glyphs.iter().take(2) {
+                let bounds = text_system.glyph_raster_bounds(&RenderGlyphParams {
+                    font_id,
+                    glyph_id: glyph.id,
+                    font_size: gpui::px(font_size),
+                    subpixel_variant: point(0, 0),
+                    scale_factor: 1.0,
+                    is_emoji: glyph.is_emoji,
+                    subpixel_rendering: false,
+                    dilation: 0,
+                })?;
+                assert!(bounds.size.height > DevicePixels(0));
+                tops.push(f32::from(glyph.position.y) + bounds.top().0 as f32);
+            }
+            assert!(tops[1] < tops[0], "font_size={font_size}, tops={tops:?}");
+        }
         Ok(())
     }
 

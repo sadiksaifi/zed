@@ -45,6 +45,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): serve the UTF-8 text targets that the X11 clipboard advertises`
 - `fix(gpui_linux): build the titlebar action only with a display backend`
 - `fix(gpui_wgpu): retain emoji fonts when loading families`
+- `fix(gpui_wgpu): preserve combining mark shaping offsets`
 
 - `feat(gpui): retain native display ownership for exported window parents`
 - `feat(gpui): offer HTML clipboard alternates on Linux`
