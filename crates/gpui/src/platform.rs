@@ -909,8 +909,38 @@ pub enum TextInputStateChange {
     ContentChanged,
 }
 
+/// An exported parent identifier and the native resources that keep it valid.
+///
+/// Retain this foreground-thread lease until the external child has closed. Clone the
+/// identifier string when sending a request to another thread; keep the lease on this thread.
+#[derive(Clone)]
+pub struct ExternalWindowParent {
+    identifier: SharedString,
+    _owner: Rc<dyn std::any::Any>,
+}
+
+impl ExternalWindowParent {
+    /// Creates an identifier while retaining its platform-owned export and display resources.
+    pub fn new(identifier: impl Into<SharedString>, owner: impl std::any::Any) -> Self {
+        Self {
+            identifier: identifier.into(),
+            _owner: Rc::new(owner),
+        }
+    }
+
+    /// The desktop protocol identifier, such as `x11:123` or `wayland:exported-handle`.
+    pub fn identifier(&self) -> &str {
+        self.identifier.as_ref()
+    }
+}
+
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
+    /// Exports this window as an external parent, retaining its native display resources.
+    fn export_external_parent(&self) -> Task<Option<ExternalWindowParent>> {
+        Task::ready(None)
+    }
+
     fn bounds(&self) -> Bounds<Pixels>;
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
@@ -3352,6 +3382,24 @@ mod atlas_tests {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn external_parent_lease_retains_native_owner_until_last_clone() {
+        struct Owner(Rc<std::cell::Cell<bool>>);
+        impl Drop for Owner {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let released = Rc::new(std::cell::Cell::new(false));
+        let parent = ExternalWindowParent::new("wayland:fixture", Owner(released.clone()));
+        let child = parent.clone();
+        drop(parent);
+        assert_eq!(child.identifier(), "wayland:fixture");
+        assert!(!released.get());
+        drop(child);
+        assert!(released.get());
+    }
 
     #[test]
     fn test_window_button_layout_parse_standard() {

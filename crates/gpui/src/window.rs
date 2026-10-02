@@ -6759,6 +6759,12 @@ impl Window {
     /// or of another launch of this application.
     ///
     /// On Wayland the token is an xdg-activation token; on X11 it is a startup notification
+    /// Exports this window for external desktop dialogs. Retain the returned lease while
+    /// a dialog uses its identifier; exporting is unavailable on unsupported platforms.
+    pub fn export_external_parent(&self) -> Task<Option<crate::ExternalWindowParent>> {
+        self.platform_window.export_external_parent()
+    }
+
     /// ID. Platforms without activation tokens behave like [`Self::activate_window`].
     pub fn activate_window_with_token(&self, token: &str) {
         self.platform_window.activate_with_token(token);

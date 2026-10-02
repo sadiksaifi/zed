@@ -1691,6 +1691,43 @@ impl rwh::HasDisplayHandle for WaylandWindow {
 }
 
 impl PlatformWindow for WaylandWindow {
+    fn export_external_parent(&self) -> gpui::Task<Option<gpui::ExternalWindowParent>> {
+        let state = self.0.state.borrow();
+        let surface = state.surface.clone();
+        let Some(backend) = surface.backend().upgrade() else {
+            return gpui::Task::ready(None);
+        };
+        let connection = wayland_client::Connection::from_backend(backend);
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        // ashpd's exporter cannot be cancelled while its internal worker owns the request.
+        // This worker always drains that future and retains an owned backend, so cancellation
+        // and application teardown cannot leave a borrowed wl_display pointer in use.
+        let spawned = std::thread::Builder::new()
+            .name("gpui-window-parent".into())
+            .spawn(move || {
+                let parent = smol::block_on(ashpd::WindowIdentifier::from_wayland(&surface))
+                    .map(|identifier| (identifier, connection));
+                if let Err(parent) = sender.send(parent) {
+                    drop(parent);
+                }
+            });
+        if spawned.is_err() {
+            return gpui::Task::ready(None);
+        }
+        state.globals.executor.spawn(async move {
+            receiver
+                .await
+                .ok()
+                .flatten()
+                .map(|(identifier, connection)| {
+                    gpui::ExternalWindowParent::new(
+                        identifier.to_string(),
+                        (identifier, connection),
+                    )
+                })
+        })
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.borrow().bounds
     }

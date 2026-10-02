@@ -1596,6 +1596,13 @@ impl X11WindowStatePtr {
 }
 
 impl PlatformWindow for X11Window {
+    fn export_external_parent(&self) -> gpui::Task<Option<gpui::ExternalWindowParent>> {
+        gpui::Task::ready(Some(gpui::ExternalWindowParent::new(
+            format!("x11:{:x}", self.0.x_window),
+            self.0.xcb.clone(),
+        )))
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.state.borrow().bounds
     }
