@@ -47,6 +47,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_wgpu): retain emoji fonts when loading families`
 - `fix(gpui_wgpu): preserve combining mark shaping offsets`
 
+- `fix(gpui_linux): preserve printable digit-row shortcut keys`
+- `fix(gpui_linux): keep Latin letters distinct from shortcut punctuation`
 - `feat(gpui): retain native display ownership for exported window parents`
 - `feat(gpui): offer HTML clipboard alternates on Linux`
 
