@@ -257,6 +257,27 @@ mod xkb_layout {
         }
 
         #[test]
+        fn latin_letters_do_not_alias_shifted_punctuation_shortcuts() {
+            let keymap = keymap("de");
+            let translation = ShiftTranslation::new(&keymap, 0);
+            for (position, expected) in [("AD11", "ü"), ("AC10", "ö"), ("AC11", "ä")] {
+                let keycode = keymap.key_by_name(position).unwrap();
+                let ordinary = keystroke_from_xkb(&translation.base, Modifiers::control(), keycode);
+                assert_eq!(ordinary.key, expected, "Control+{expected}");
+                let shifted =
+                    keystroke_from_xkb(&translation.shifted, Modifiers::control_shift(), keycode);
+                assert_eq!(shifted.key, expected, "Control+Shift+{expected}");
+                assert_eq!(shifted.modifiers, Modifiers::control_shift());
+            }
+            // Control+ö must remain distinct from the Settings shortcut Control+Shift+comma.
+            let comma = keymap.key_by_name("AB08").unwrap();
+            let settings =
+                keystroke_from_xkb(&translation.shifted, Modifiers::control_shift(), comma);
+            assert_eq!(settings.key, ";");
+            assert_eq!(settings.modifiers, Modifiers::control());
+        }
+
+        #[test]
         fn french_layout_pairs_shift_to_digits() {
             let keymap = keymap("fr");
             let pairs = pairs(&layout(&keymap, 0));
@@ -294,6 +315,7 @@ mod xkb_layout {
             let keymap = keymap("ru");
             let pairs = pairs(&layout(&keymap, 0));
             assert_eq!(shifted(&pairs, "1"), Some("!"));
+            assert_eq!(shifted(&pairs, ";"), Some(":"));
             assert_pairs_match_key_events(&keymap, 0);
         }
     }

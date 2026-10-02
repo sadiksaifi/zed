@@ -28,6 +28,8 @@ use calloop::{LoopSignal, channel::Sender};
 use futures::channel::oneshot;
 use gpui_util::{ResultExt as _, new_std_command};
 #[cfg(any(feature = "wayland", feature = "x11"))]
+use unicode_script::{Script, UnicodeScript as _};
+#[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
@@ -1192,9 +1194,11 @@ pub(super) fn keystroke_from_xkb(
             } else if let Some(character) = char::from_u32(xkb::keysym_to_utf32(key_sym))
                 && !character.is_control()
                 && !character.is_whitespace()
-                && (!character.is_alphabetic() || guess_ascii(keycode, modifiers.shift).is_none())
+                && (!character.is_alphabetic()
+                    || character.script() == Script::Latin
+                    || guess_ascii(keycode, modifiers.shift).is_none())
             {
-                // Preserve printable symbols and keys without a positional ASCII equivalent.
+                // Preserve Latin letters, symbols and keys without an ASCII equivalent.
                 // In particular, German § and French accented digit-row keys must match the
                 // shift pairs reported by the active keymap. Non-Latin letter positions keep
                 // their ASCII shortcut equivalents below.
