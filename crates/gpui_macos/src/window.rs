@@ -25,12 +25,12 @@ use cocoa::{
 use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, DisplayId,
-    ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, WindowVisibility, point, px, size,
+    ExternalDragPayload, ExternalPaths, FileDragIcon, FileDropEvent, ForegroundExecutor,
+    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -2349,9 +2349,13 @@ impl PlatformWindow for MacWindow {
             // AppKit keeps this frame's distance from the event's location as the drag image's
             // offset from the cursor, so it has to stay anchored on `event`.
             let location: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
+            let icon_size = match paths.icon() {
+                FileDragIcon::FileType => 32.,
+                FileDragIcon::File { size } => f64::from(size.as_f32()),
+            };
             let frame = NSRect::new(
-                NSPoint::new(location.x - 16., location.y - 16.),
-                NSSize::new(32., 32.),
+                NSPoint::new(location.x - icon_size / 2., location.y - icon_size / 2.),
+                NSSize::new(icon_size, icon_size),
             );
 
             for (path, is_directory) in paths.entries() {
@@ -2375,31 +2379,47 @@ impl PlatformWindow for MacWindow {
                 );
 
                 // Resolve drag images lazily via `imageComponentsProvider` (Apple's
-                // recommendation for large item counts), and by file *type* rather than
-                // `iconForFile:`, which can synchronously hit LaunchServices, network
-                // mounts, or iCloud for every selected path and beachball drag startup.
-                // `iconForFileType:` is deprecated in favor of `iconForContentType:`,
-                // but the replacement requires macOS 11 and we target 10.15.
-                let file_type = if *is_directory {
-                    "public.folder".to_string()
-                } else {
-                    path.extension()
-                        .and_then(|extension| extension.to_str())
-                        .map(|extension| extension.to_string())
-                        .unwrap_or_else(|| "public.data".to_string())
+                // recommendation for large item counts). `FileDragIcon::FileType` resolves by
+                // file *type* rather than `iconForFile:`, which can synchronously hit
+                // LaunchServices, network mounts, or iCloud for every selected path and
+                // beachball drag startup. `iconForFileType:` is deprecated in favor of
+                // `iconForContentType:`, but the replacement requires macOS 11 and we target
+                // 10.15.
+                let icon_source = match paths.icon() {
+                    FileDragIcon::FileType => DragIconSource::FileType(if *is_directory {
+                        "public.folder".to_string()
+                    } else {
+                        path.extension()
+                            .and_then(|extension| extension.to_str())
+                            .map(|extension| extension.to_string())
+                            .unwrap_or_else(|| "public.data".to_string())
+                    }),
+                    FileDragIcon::File { .. } => match url.path() {
+                        Some(path) => DragIconSource::File(path),
+                        None => DragIconSource::FileType("public.data".to_string()),
+                    },
                 };
                 let provider = RcBlock::new(move || {
                     let component = NSDraggingImageComponent::draggingImageComponentWithKey(
                         NSDraggingImageComponentIconKey,
                     );
                     let workspace = NSWorkspace::sharedWorkspace();
-                    let file_type = NSString::from_str(&file_type);
-                    // TODO: Replace with `iconForContentType` once Zed no longer supports MacOS 10.15
-                    #[expect(deprecated, reason = "Support for MacOS 10.15")]
-                    let icon = workspace.iconForFileType(&file_type);
+                    let icon = match &icon_source {
+                        DragIconSource::FileType(file_type) => {
+                            let file_type = NSString::from_str(file_type);
+                            // TODO: Replace with `iconForContentType` once Zed no longer supports MacOS 10.15
+                            #[expect(deprecated, reason = "Support for MacOS 10.15")]
+                            workspace.iconForFileType(&file_type)
+                        }
+                        DragIconSource::File(path) => workspace.iconForFile(path),
+                    };
+                    icon.setSize(NSSize::new(icon_size, icon_size));
                     component.setContents(Some(&icon));
                     // Component frames are relative to the item's dragging frame.
-                    component.setFrame(NSRect::new(NSPoint::new(0., 0.), NSSize::new(32., 32.)));
+                    component.setFrame(NSRect::new(
+                        NSPoint::new(0., 0.),
+                        NSSize::new(icon_size, icon_size),
+                    ));
                     let components = NSArray::from_slice(&[&*component]);
                     NonNull::new_unchecked(Retained::autorelease_return(components))
                 });
@@ -3794,6 +3814,14 @@ fn external_paths_from_event(dragging_info: *mut Object) -> Option<ExternalPaths
 extern "C" fn conclude_drag_operation(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
     send_file_drop_event(window_state, FileDropEvent::Exited);
+}
+
+/// Where a native file drag item's image comes from.
+enum DragIconSource {
+    /// A file type identifier or extension, resolved without touching the file.
+    FileType(String),
+    /// The file's own path.
+    File(Retained<objc2_foundation::NSString>),
 }
 
 extern "C" fn dragging_session_source_operation_mask(

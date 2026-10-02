@@ -1,7 +1,7 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DisplayId, Decorations, DrawPhase,
-    Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
+    Drawable, Element, Empty, EntityId, EventEmitter, ExternalDragPayload, ForegroundExecutor, Global, InputEvent,
     KeyEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NativeKeyEvent, Pixels, Platform, PlatformTextSystem, Point,
     Render, Result, SharedString, Size, SystemNotification, SystemNotificationResponse, Task,
@@ -577,6 +577,14 @@ impl TestAppContext {
     /// Returns every window-management request the window received, oldest first.
     pub fn window_requests(&self, window_handle: AnyWindowHandle) -> Vec<TestWindowRequest> {
         self.test_window(window_handle).requests()
+    }
+
+    /// Returns every payload the window handed to the platform as a native drag, oldest first.
+    pub fn external_drag_payloads(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Vec<ExternalDragPayload> {
+        self.test_window(window_handle).external_drag_payloads()
     }
 
     /// Returns every bounds and display the window was asked to use, oldest first.

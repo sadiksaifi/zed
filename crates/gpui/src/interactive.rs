@@ -737,18 +737,50 @@ pub enum ExternalDragPayload {
 /// Paths handed to the platform for a native file drag. Directory metadata is
 /// provided by the caller to avoid querying it when the platform drag starts.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct FileDragPaths(SmallVec<[(PathBuf, bool); 2]>);
+pub struct FileDragPaths {
+    entries: SmallVec<[(PathBuf, bool); 2]>,
+    icon: FileDragIcon,
+}
 
 impl FileDragPaths {
     /// Creates a native file-drag payload from paths paired with whether each path is a directory.
     pub fn new(entries: impl IntoIterator<Item = (PathBuf, bool)>) -> Self {
-        Self(entries.into_iter().collect())
+        Self {
+            entries: entries.into_iter().collect(),
+            icon: FileDragIcon::default(),
+        }
+    }
+
+    /// Replaces how the platform draws each dragged path.
+    pub fn with_icon(mut self, icon: FileDragIcon) -> Self {
+        self.icon = icon;
+        self
     }
 
     /// The dragged paths, each paired with whether it is a directory.
     pub fn entries(&self) -> &[(PathBuf, bool)] {
-        &self.0
+        &self.entries
     }
+
+    /// How the platform draws each dragged path.
+    pub fn icon(&self) -> FileDragIcon {
+        self.icon
+    }
+}
+
+/// How the platform draws each path of a native file drag.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub enum FileDragIcon {
+    /// A small generic icon for the path's file type. Resolving it never touches the file
+    /// system, so it suits large selections and slow volumes.
+    #[default]
+    FileType,
+    /// The path's own icon, such as an application's icon, drawn at `size` points square.
+    /// Resolving it reads each file, so it suits a few local paths.
+    File {
+        /// The icon's width and height.
+        size: Pixels,
+    },
 }
 
 impl Render for ExternalPaths {
