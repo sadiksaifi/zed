@@ -1189,6 +1189,16 @@ pub(super) fn keystroke_from_xkb(
                 } else {
                     name
                 }
+            } else if let Some(character) = char::from_u32(xkb::keysym_to_utf32(key_sym))
+                && !character.is_control()
+                && !character.is_whitespace()
+                && (!character.is_alphabetic() || guess_ascii(keycode, modifiers.shift).is_none())
+            {
+                // Preserve printable symbols and keys without a positional ASCII equivalent.
+                // In particular, German § and French accented digit-row keys must match the
+                // shift pairs reported by the active keymap. Non-Latin letter positions keep
+                // their ASCII shortcut equivalents below.
+                character.to_lowercase().collect()
             } else if let Some(key_en) = guess_ascii(keycode, modifiers.shift) {
                 String::from(key_en)
             } else {

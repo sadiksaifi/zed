@@ -241,6 +241,7 @@ mod xkb_layout {
             for (base, expected) in [
                 ("1", "!"),
                 ("2", "\""),
+                ("3", "§"),
                 ("7", "/"),
                 ("0", "="),
                 ("+", "*"),
@@ -252,8 +253,6 @@ mod xkb_layout {
             ] {
                 assert_eq!(shifted(&pairs, base), Some(expected), "de {base:?}");
             }
-            // Key events spell non-ASCII keys by keysym name ("section"), which is not a pair.
-            assert_eq!(shifted(&pairs, "3"), None);
             assert_pairs_match_key_events(&keymap, 0);
         }
 
@@ -263,11 +262,15 @@ mod xkb_layout {
             let pairs = pairs(&layout(&keymap, 0));
             for (base, expected) in [
                 ("&", "1"),
+                ("é", "2"),
                 ("\"", "3"),
                 ("'", "4"),
                 ("(", "5"),
                 ("-", "6"),
+                ("è", "7"),
                 ("_", "8"),
+                ("ç", "9"),
+                ("à", "0"),
                 ("=", "+"),
                 (",", "?"),
                 (";", "."),
