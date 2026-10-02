@@ -24,11 +24,11 @@ use cocoa::{
 };
 use dispatch2::DispatchQueue;
 use gpui::{
-    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
+    AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, DisplayId,
+    ExternalDragPayload, ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
     WindowParams, WindowVisibility, point, px, size,
 };
@@ -1074,41 +1074,7 @@ impl MacWindow {
             let display = display_id
                 .and_then(MacDisplay::find_by_id)
                 .unwrap_or_else(MacDisplay::primary);
-
-            let mut target_screen = nil;
-            let mut screen_frame = None;
-
-            let screens = NSScreen::screens(nil);
-            let count: u64 = cocoa::foundation::NSArray::count(screens);
-            for i in 0..count {
-                let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
-                let Some(display_id) = display_id_for_screen(screen) else {
-                    continue;
-                };
-                let frame = NSScreen::frame(screen);
-                if display_id == display.0 {
-                    screen_frame = Some(frame);
-                    target_screen = screen;
-                }
-            }
-
-            let screen_frame = screen_frame.unwrap_or_else(|| {
-                let screen = NSScreen::mainScreen(nil);
-                target_screen = screen;
-                NSScreen::frame(screen)
-            });
-
-            let window_rect = NSRect::new(
-                NSPoint::new(
-                    screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
-                    screen_frame.origin.y
-                        + (display.bounds().size.height - bounds.origin.y).as_f32() as f64,
-                ),
-                NSSize::new(
-                    bounds.size.width.as_f32() as f64,
-                    bounds.size.height.as_f32() as f64,
-                ),
-            );
+            let (target_screen, window_rect) = display_window_rect(&display, bounds);
 
             let native_window = native_window.initWithContentRect_styleMask_backing_defer_screen_(
                 window_rect,
@@ -1494,6 +1460,30 @@ impl PlatformWindow for MacWindow {
                         width: size.width.as_f32() as f64,
                         height: size.height.as_f32() as f64,
                     });
+                })
+            })
+            .detach();
+    }
+
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+        let this = self.0.lock();
+        let window = this.native_window;
+        let closed = this.closed.clone();
+        this.foreground_executor
+            .spawn(async move {
+                if_window_not_closed(closed, || unsafe {
+                    let display = display_id
+                        .and_then(MacDisplay::find_by_id)
+                        .unwrap_or_else(MacDisplay::primary);
+                    let (_, top_left_rect) = display_window_rect(&display, bounds);
+                    let frame = NSRect::new(
+                        NSPoint::new(
+                            top_left_rect.origin.x,
+                            top_left_rect.origin.y - top_left_rect.size.height,
+                        ),
+                        top_left_rect.size,
+                    );
+                    window.setFrame_display_(frame, YES);
                 })
             })
             .detach();
@@ -3931,6 +3921,49 @@ where
         Some(result)
     } else {
         None
+    }
+}
+
+/// Returns the screen showing `display` and a Cocoa rect whose origin is the top-left corner of
+/// `bounds`, which are relative to the top-left corner of `display`.
+///
+/// Falls back to the main screen when `display` has no matching screen.
+unsafe fn display_window_rect(display: &MacDisplay, bounds: Bounds<Pixels>) -> (id, NSRect) {
+    unsafe {
+        let mut target_screen = nil;
+        let mut screen_frame = None;
+
+        let screens = NSScreen::screens(nil);
+        let count: u64 = cocoa::foundation::NSArray::count(screens);
+        for i in 0..count {
+            let screen = cocoa::foundation::NSArray::objectAtIndex(screens, i);
+            let Some(display_id) = display_id_for_screen(screen) else {
+                continue;
+            };
+            if display_id == display.0 {
+                screen_frame = Some(NSScreen::frame(screen));
+                target_screen = screen;
+            }
+        }
+
+        let screen_frame = screen_frame.unwrap_or_else(|| {
+            let screen = NSScreen::mainScreen(nil);
+            target_screen = screen;
+            NSScreen::frame(screen)
+        });
+
+        let window_rect = NSRect::new(
+            NSPoint::new(
+                screen_frame.origin.x + bounds.origin.x.as_f32() as f64,
+                screen_frame.origin.y
+                    + (display.bounds().size.height - bounds.origin.y).as_f32() as f64,
+            ),
+            NSSize::new(
+                bounds.size.width.as_f32() as f64,
+                bounds.size.height.as_f32() as f64,
+            ),
+        );
+        (target_screen, window_rect)
     }
 }
 

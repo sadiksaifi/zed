@@ -55,6 +55,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_web): report unsupported window background effects`
 - `fix(gpui_linux): retain held modifiers when the other side releases`
 - `fix(gpui_linux): honor display backend feature gates`
+- `feat(gpui): move and resize windows with set_bounds`
 
 ## Monthly rebase
 

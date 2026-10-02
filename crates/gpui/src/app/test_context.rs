@@ -1,6 +1,6 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
-    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, Decorations, DrawPhase,
+    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DisplayId, Decorations, DrawPhase,
     Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
     KeyEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, NativeKeyEvent, Pixels, Platform, PlatformTextSystem, Point,
@@ -577,6 +577,14 @@ impl TestAppContext {
     /// Returns every window-management request the window received, oldest first.
     pub fn window_requests(&self, window_handle: AnyWindowHandle) -> Vec<TestWindowRequest> {
         self.test_window(window_handle).requests()
+    }
+
+    /// Returns every bounds and display the window was asked to use, oldest first.
+    pub fn window_bounds_requests(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Vec<(Bounds<Pixels>, Option<DisplayId>)> {
+        self.test_window(window_handle).bounds_requests()
     }
 
     /// Returns true if there's an alert dialog open.

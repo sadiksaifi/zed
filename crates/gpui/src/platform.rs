@@ -966,6 +966,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         false
     }
     fn resize(&mut self, size: Size<Pixels>);
+    /// Moves and resizes the window frame.
+    ///
+    /// `bounds` are relative to the top-left corner of the display named by `display_id`, or of
+    /// the primary display when `display_id` is `None`, matching [`WindowOptions::window_bounds`].
+    /// Platforms without programmatic window placement ignore the request.
+    fn set_bounds(&mut self, _bounds: Bounds<Pixels>, _display_id: Option<DisplayId>) {}
     fn scale_factor(&self) -> f32;
     fn appearance(&self) -> WindowAppearance;
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>>;

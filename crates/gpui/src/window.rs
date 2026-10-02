@@ -2760,6 +2760,15 @@ impl Window {
         self.platform_window.resize(size);
     }
 
+    /// Moves and resizes the window frame.
+    ///
+    /// `bounds` are relative to the top-left corner of the display named by `display_id`, or of
+    /// the primary display when `display_id` is `None`, matching [`WindowOptions::window_bounds`].
+    /// Platforms without programmatic window placement ignore the request.
+    pub fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+        self.platform_window.set_bounds(bounds, display_id);
+    }
+
     /// Returns whether or not the window is currently fullscreen
     pub fn is_fullscreen(&self) -> bool {
         self.platform_window.is_fullscreen()
@@ -8091,7 +8100,7 @@ mod tests {
     };
 
     use crate::{
-        AnyWindowHandle, AppContext as _, Bounds, ContentMask, Context, DispatchPhase,
+        AnyWindowHandle, AppContext as _, Bounds, ContentMask, Context, DispatchPhase, DisplayId,
         DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent,
         FocusHandle, InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent,
         Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
@@ -10329,6 +10338,25 @@ mod tests {
         assert_eq!(
             cx.traffic_light_position_updates(handle.into()),
             vec![first, second]
+        );
+    }
+
+    #[gpui::test]
+    fn test_set_bounds_moves_window_on_requested_display(cx: &mut TestAppContext) {
+        let handle = cx.add_window(|_, _| EmptyView);
+        let bounds = Bounds::new(point(px(40.), px(60.)), size(px(320.), px(180.)));
+        let display_id = DisplayId::new(7);
+        let window_bounds = cx
+            .update_window(handle.into(), |_, window, _| {
+                window.set_bounds(bounds, Some(display_id));
+                window.bounds()
+            })
+            .unwrap();
+
+        assert_eq!(window_bounds, bounds);
+        assert_eq!(
+            cx.window_bounds_requests(handle.into()),
+            vec![(bounds, Some(display_id))]
         );
     }
 }

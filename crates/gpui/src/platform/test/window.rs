@@ -1,5 +1,5 @@
 use crate::{
-    A11yCallbacks, AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult,
+    A11yCallbacks, AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, DisplayId,
     GpuSpecs, HeadlessAtlas, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
     PromptButton, RequestFrameOptions, ResizeEdge, Scene, Size, TestPlatform,
@@ -91,6 +91,7 @@ pub(crate) struct TestWindowState {
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
+    bounds_requests: Vec<(Bounds<Pixels>, Option<DisplayId>)>,
 }
 
 #[derive(Clone)]
@@ -173,6 +174,7 @@ impl TestWindow {
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
             native_key_event: None,
+            bounds_requests: Vec::new(),
         })))
     }
     pub fn simulate_scheduled_frame(&self) -> bool {
@@ -408,6 +410,11 @@ impl TestWindow {
     pub fn set_start_external_drag_result(&self, result: bool) {
         self.0.lock().start_external_drag_result = result;
     }
+
+    /// Every bounds and display passed to `set_bounds`, oldest first.
+    pub fn bounds_requests(&self) -> Vec<(Bounds<Pixels>, Option<DisplayId>)> {
+        self.0.lock().bounds_requests.clone()
+    }
 }
 
 impl PlatformWindow for TestWindow {
@@ -466,6 +473,12 @@ impl PlatformWindow for TestWindow {
     fn resize(&mut self, size: Size<Pixels>) {
         let mut lock = self.0.lock();
         lock.bounds.size = size;
+    }
+
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+        let mut lock = self.0.lock();
+        lock.bounds = bounds;
+        lock.bounds_requests.push((bounds, display_id));
     }
 
     fn scale_factor(&self) -> f32 {
