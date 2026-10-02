@@ -13,6 +13,6 @@ and actual color bitmap glyph. It intentionally has no Latin `m` glyph, as in
 the original font, so loading it exercises the emoji font validation path.
 Normal builds do not embed this test fixture.
 
-Reproduce with `uv run assets/fonts/noto-color-emoji/prepare.py <NotoColorEmoji.ttf>`.
+Reproduce with `uv run crates/gpui_wgpu/test_data/noto-color-emoji/prepare.py <NotoColorEmoji.ttf>`.
 The preparation script pins fontTools 4.66.0 and the source SHA-256.
 `SHA256SUMS` records the fixture and upstream license hashes.

@@ -46,6 +46,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): build the titlebar action only with a display backend`
 - `fix(gpui_wgpu): retain emoji fonts when loading families`
 - `fix(gpui_wgpu): preserve combining mark shaping offsets`
+- `test(gpui_wgpu): isolate emoji font regression fixture`
 
 - `fix(gpui_linux): preserve printable digit-row shortcut keys`
 - `fix(gpui_linux): keep Latin letters distinct from shortcut punctuation`

@@ -1232,7 +1232,7 @@ mod tests {
     fn loading_emoji_font_preserves_emoji_glyphs_and_family() -> Result<()> {
         let text_system = text_system()?;
         text_system.add_fonts(vec![Cow::Borrowed(include_bytes!(
-            "../../../assets/fonts/noto-color-emoji/NotoColorEmoji-Subset.ttf"
+            "../test_data/noto-color-emoji/NotoColorEmoji-Subset.ttf"
         ))])?;
 
         let emoji_font_id = text_system.font_id(&gpui::font("Noto Color Emoji"))?;
