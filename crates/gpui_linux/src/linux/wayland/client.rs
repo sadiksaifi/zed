@@ -612,6 +612,8 @@ impl WaylandClientStatePtr {
             data_device_manager.create_data_source(&state.globals.qh, DataSourceKind::Drag);
         source.offer(FILE_LIST_MIME_TYPE.to_string());
         source.set_actions(DndAction::Copy | DndAction::Move);
+        // FileDragIcon requests have no icon surface on this backend; the compositor chooses
+        // the drag appearance while the file URI payload is transferred normally.
         data_device.start_drag(Some(&source), surface, None, serial.as_raw());
 
         state.external_drag = Some(ExternalDrag {
