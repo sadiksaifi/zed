@@ -1,8 +1,8 @@
 use crate::{
-    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
-    TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
+    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, ExternalDragPayload,
+    GpuSpecs, HeadlessAtlas, Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
+    Scene, Size, TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
     WindowVisibility,
 };
@@ -57,7 +57,7 @@ pub(crate) struct TestWindowState {
     is_fullscreen: bool,
     scale_factor: f32,
     appearance: WindowAppearance,
-    external_drag_files: Vec<(PathBuf, bool)>,
+    external_drag_payloads: Vec<ExternalDragPayload>,
     start_external_drag_result: bool,
     bounds_requests: Vec<(Bounds<Pixels>, Option<DisplayId>)>,
 }
@@ -134,7 +134,7 @@ impl TestWindow {
             // Preserve the test platform's historical 2x default.
             scale_factor: 2.0,
             appearance: WindowAppearance::Light,
-            external_drag_files: Vec::new(),
+            external_drag_payloads: Vec::new(),
             start_external_drag_result: false,
             bounds_requests: Vec::new(),
         })))
@@ -293,7 +293,19 @@ impl TestWindow {
     }
 
     pub fn external_drag_files(&self) -> Vec<(PathBuf, bool)> {
-        self.0.lock().external_drag_files.clone()
+        self.0
+            .lock()
+            .external_drag_payloads
+            .iter()
+            .flat_map(|payload| match payload {
+                ExternalDragPayload::Files(paths) => paths.entries().iter().cloned(),
+            })
+            .collect()
+    }
+
+    /// Every payload handed to the platform as a native drag, oldest first.
+    pub fn external_drag_payloads(&self) -> Vec<ExternalDragPayload> {
+        self.0.lock().external_drag_payloads.clone()
     }
 
     pub fn set_start_external_drag_result(&self, result: bool) {
@@ -601,13 +613,9 @@ impl PlatformWindow for TestWindow {
         true
     }
 
-    fn start_external_drag(&self, payload: &crate::ExternalDragPayload) -> bool {
+    fn start_external_drag(&self, payload: &ExternalDragPayload) -> bool {
         let mut state = self.0.lock();
-        match payload {
-            crate::ExternalDragPayload::Files(paths) => {
-                state.external_drag_files.extend_from_slice(paths.entries());
-            }
-        }
+        state.external_drag_payloads.push(payload.clone());
         state.start_external_drag_result
     }
 

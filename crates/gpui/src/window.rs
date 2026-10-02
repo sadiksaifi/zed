@@ -8017,10 +8017,10 @@ mod tests {
 
     use crate::{
         AnyWindowHandle, AppContext as _, Bounds, ContentMask, Context, DispatchPhase, DisplayId,
-        DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths, FileDragPaths, FileDropEvent,
-        FocusHandle, InputEvent as _, InteractiveElement as _, IntoElement, KeyDownEvent,
-        Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-        Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
+        DragMoveEvent, Empty, ExternalDragPayload, ExternalPaths, FileDragIcon, FileDragPaths,
+        FileDropEvent, FocusHandle, InputEvent as _, InteractiveElement as _, IntoElement,
+        KeyDownEvent, Keystroke, LongPressEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+        ParentElement, Pixels, PlatformInput, Point, Render, RequestFrameOptions, ScaledPixels,
         StatefulInteractiveElement as _, Styled, TestAppContext, TouchDragEvent, TouchEvent,
         TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance, WindowOptions,
         canvas, div, hsla, point, px, size,
@@ -8542,10 +8542,10 @@ mod tests {
                 .size_full()
                 .on_drag(self.path.clone(), |_, _, _, cx| cx.new(|_| Empty))
                 .external_drag_payload(|path: &PathBuf, _, _| {
-                    Some(ExternalDragPayload::Files(FileDragPaths::new([(
-                        path.clone(),
-                        true,
-                    )])))
+                    Some(ExternalDragPayload::Files(
+                        FileDragPaths::new([(path.clone(), true)])
+                            .with_icon(FileDragIcon::File { size: px(56.) }),
+                    ))
                 })
                 .on_drag_move({
                     let observed_drag_moves = self.observed_drag_moves.clone();
@@ -8644,6 +8644,13 @@ mod tests {
         assert_eq!(
             cx.test_window(successful.window).external_drag_files(),
             [(successful_path.clone(), true)]
+        );
+        assert_eq!(
+            cx.external_drag_payloads(successful.window),
+            [ExternalDragPayload::Files(
+                FileDragPaths::new([(successful_path.clone(), true)])
+                    .with_icon(FileDragIcon::File { size: px(56.) })
+            )]
         );
         // Views must still see the move that leaves the window, otherwise they never learn to tear
         // down the drag state they built up while the pointer was inside.
