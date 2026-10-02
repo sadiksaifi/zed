@@ -137,7 +137,11 @@ impl Pasteboard {
                     }
                 });
 
-            Some(ClipboardEntry::String(ClipboardString { text, metadata }))
+            Some(ClipboardEntry::String(ClipboardString {
+                text,
+                metadata,
+                html: None,
+            }))
         }
     }
 
@@ -181,6 +185,7 @@ impl Pasteboard {
                     let mut combined = ClipboardString {
                         text: String::new(),
                         metadata: None,
+                        html: None,
                     };
 
                     for entry in item.entries {

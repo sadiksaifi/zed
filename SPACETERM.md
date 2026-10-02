@@ -46,6 +46,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): build the titlebar action only with a display backend`
 
 - `feat(gpui): retain native display ownership for exported window parents`
+- `feat(gpui): offer HTML clipboard alternates on Linux`
 
 ## Monthly rebase
 

@@ -13,8 +13,8 @@ use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection
 use crate::linux::{
     WaylandClientStatePtr,
     clipboard_formats::{
-        ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, URI_LIST_MIME_TYPE, file_list_item,
-        parse_gnome_copied_files, parse_uri_list,
+        ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, HTML_MIME_TYPE, URI_LIST_MIME_TYPE,
+        file_list_item, parse_gnome_copied_files, parse_uri_list,
     },
     platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
 };
@@ -58,6 +58,7 @@ impl OwnedSelection {
 
     fn bytes_for(&self, mime_type: &str) -> Option<&[u8]> {
         let representation = match mime_type {
+            HTML_MIME_TYPE => self.offer.html(),
             URI_LIST_MIME_TYPE => self.offer.uri_list(),
             GNOME_COPIED_FILES_MIME_TYPE => self.offer.gnome_copied_files(),
             _ if TEXT_MIME_TYPES.contains(&mime_type) => self.offer.text(),
@@ -74,6 +75,9 @@ impl OwnedSelection {
         }
         if self.offer.gnome_copied_files().is_some() {
             mime_types.push(GNOME_COPIED_FILES_MIME_TYPE);
+        }
+        if self.offer.html().is_some() {
+            mime_types.push(HTML_MIME_TYPE);
         }
         if self.offer.text().is_some() {
             mime_types.extend(TEXT_MIME_TYPES);
@@ -333,5 +337,34 @@ impl Clipboard {
                 },
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn clipboard_html_offer_serves_exact_alternate_and_plain_fallback() {
+        let selection = OwnedSelection::new(
+            ClipboardEntry::String(
+                gpui::ClipboardString::new("plain <text>".into())
+                    .with_html("<pre>plain &lt;text&gt;</pre>".into()),
+            )
+            .into(),
+        );
+        assert!(selection.mime_types().contains(&HTML_MIME_TYPE));
+        assert_eq!(
+            selection.bytes_for(HTML_MIME_TYPE),
+            Some(b"<pre>plain &lt;text&gt;</pre>".as_slice())
+        );
+        for text_type in TEXT_MIME_TYPES {
+            assert_eq!(
+                selection.bytes_for(text_type),
+                Some(b"plain <text>".as_slice())
+            );
+        }
+        let plain = OwnedSelection::new(ClipboardItem::new_string("plain".into()));
+        assert!(!plain.mime_types().contains(&HTML_MIME_TYPE));
+        assert_eq!(plain.bytes_for(HTML_MIME_TYPE), None);
     }
 }

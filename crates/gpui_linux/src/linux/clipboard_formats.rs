@@ -13,6 +13,9 @@ use std::{
 use gpui::{ClipboardEntry, ClipboardItem, ClipboardString, ExternalPaths};
 use smallvec::SmallVec;
 
+/// HTML alternate for rich text consumers.
+pub(crate) const HTML_MIME_TYPE: &str = "text/html";
+
 /// The freedesktop.org file list format.
 pub(crate) const URI_LIST_MIME_TYPE: &str = "text/uri-list";
 /// The GNOME file list format, read by Nautilus and other GTK file managers on paste.
@@ -178,6 +181,7 @@ fn paths_text(paths: &[PathBuf]) -> String {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClipboardOffer {
     text: Option<String>,
+    html: Option<String>,
     uri_list: Option<String>,
     gnome_copied_files: Option<String>,
 }
@@ -205,6 +209,7 @@ impl ClipboardOffer {
 
         Self {
             text: Some(text).filter(|text| !text.is_empty()),
+            html: item.html().map(str::to_owned),
             uri_list,
             gnome_copied_files,
         }
@@ -213,6 +218,11 @@ impl ClipboardOffer {
     /// The plain text representation.
     pub(crate) fn text(&self) -> Option<&str> {
         self.text.as_deref()
+    }
+
+    /// HTML for rich-text consumers, independent of plain-text paste.
+    pub(crate) fn html(&self) -> Option<&str> {
+        self.html.as_deref()
     }
 
     /// The `text/uri-list` representation, present when the item carries local paths.
@@ -369,6 +379,7 @@ mod tests {
             offer,
             ClipboardOffer {
                 text: Some("text".to_string()),
+                html: None,
                 uri_list: None,
                 gnome_copied_files: None,
             }

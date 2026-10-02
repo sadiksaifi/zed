@@ -2816,6 +2816,7 @@ impl ClipboardItem {
         Self {
             entries: vec![ClipboardEntry::String(ClipboardString {
                 text,
+                html: None,
                 metadata: Some(metadata),
             })],
         }
@@ -2843,7 +2844,7 @@ impl ClipboardItem {
         let mut answer = String::new();
 
         for entry in self.entries.iter() {
-            if let ClipboardEntry::String(ClipboardString { text, metadata: _ }) = entry {
+            if let ClipboardEntry::String(ClipboardString { text, .. }) = entry {
                 answer.push_str(text);
             }
         }
@@ -2863,6 +2864,14 @@ impl ClipboardItem {
             Some(answer)
         } else {
             None
+        }
+    }
+
+    /// If this item is one string, returns its HTML alternate without changing its plain text.
+    pub fn html(&self) -> Option<&str> {
+        match self.entries.as_slice() {
+            [ClipboardEntry::String(string)] => string.html.as_deref(),
+            _ => None,
         }
     }
 
@@ -3160,6 +3169,8 @@ impl Image {
 /// A clipboard item that should be copied to the clipboard
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClipboardString {
+    /// An optional HTML alternate for this same plain-text selection.
+    pub html: Option<String>,
     /// The text content.
     pub text: String,
     /// Optional metadata associated with this clipboard string.
@@ -3172,7 +3183,14 @@ impl ClipboardString {
         Self {
             text,
             metadata: None,
+            html: None,
         }
+    }
+
+    /// Add HTML as an alternate representation of this same plain-text selection.
+    pub fn with_html(mut self, html: String) -> Self {
+        self.html = Some(html);
+        self
     }
 
     /// Return a new clipboard item with the metadata replaced by the given metadata,
@@ -3216,6 +3234,7 @@ impl From<String> for ClipboardString {
         Self {
             text: value,
             metadata: None,
+            html: None,
         }
     }
 }
@@ -3382,6 +3401,18 @@ mod atlas_tests {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn clipboard_html_alternate_keeps_plain_text_and_metadata() {
+        let string = ClipboardString::new("plain <text>".into())
+            .with_json_metadata("selection")
+            .with_html("<pre>plain &lt;text&gt;</pre>".into());
+        let item = ClipboardItem::from(ClipboardEntry::String(string));
+        assert_eq!(item.text().as_deref(), Some("plain <text>"));
+        assert_eq!(item.metadata().map(String::as_str), Some("\"selection\""));
+        assert_eq!(item.html(), Some("<pre>plain &lt;text&gt;</pre>"));
+        assert_eq!(ClipboardItem::new_string("plain".into()).html(), None);
+    }
 
     #[test]
     fn external_parent_lease_retains_native_owner_until_last_clone() {

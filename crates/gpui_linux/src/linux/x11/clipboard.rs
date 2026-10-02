@@ -50,8 +50,8 @@ use gpui::{ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
 
 use crate::linux::clipboard_formats::{
-    ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, URI_LIST_MIME_TYPE, file_list_item,
-    parse_gnome_copied_files, parse_uri_list,
+    ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, HTML_MIME_TYPE, URI_LIST_MIME_TYPE,
+    file_list_item, parse_gnome_copied_files, parse_uri_list,
 };
 
 type Result<T, E = Error> = std::result::Result<T, E>;
@@ -81,7 +81,7 @@ x11rb::atom_manager! {
         TEXT,
         TEXT_MIME_UNKNOWN: b"text/plain",
 
-        // HTML: b"text/html",
+        HTML: HTML_MIME_TYPE.as_bytes(),
         URI_LIST: URI_LIST_MIME_TYPE.as_bytes(),
         GNOME_COPIED_FILES: GNOME_COPIED_FILES_MIME_TYPE.as_bytes(),
 
@@ -1009,6 +1009,12 @@ impl Clipboard {
             data.push(ClipboardData {
                 bytes: gnome_copied_files.as_bytes().to_vec(),
                 format: atoms.GNOME_COPIED_FILES,
+            });
+        }
+        if let Some(html) = offer.html() {
+            data.push(ClipboardData {
+                bytes: html.as_bytes().to_vec(),
+                format: atoms.HTML,
             });
         }
         data.push(ClipboardData {

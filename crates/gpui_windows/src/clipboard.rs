@@ -229,7 +229,11 @@ fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
 fn read_string() -> Option<ClipboardEntry> {
     let text = get_clipboard_string(CF_UNICODETEXT.0 as u32)?;
     let metadata = read_clipboard_metadata(&text);
-    Some(ClipboardEntry::String(ClipboardString { text, metadata }))
+    Some(ClipboardEntry::String(ClipboardString {
+        text,
+        metadata,
+        html: None,
+    }))
 }
 
 fn read_clipboard_metadata(text: &str) -> Option<String> {
