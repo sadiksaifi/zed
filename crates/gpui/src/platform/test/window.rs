@@ -1,9 +1,10 @@
 use crate::{
-    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size, TestPlatform,
-    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowInsets, WindowParams, WindowVisibility,
+    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size,
+    TestPlatform, TextInputConfiguration, TextInputStateChange, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets, WindowParams,
+    WindowVisibility,
 };
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
@@ -58,6 +59,7 @@ pub(crate) struct TestWindowState {
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
+    bounds_requests: Vec<(Bounds<Pixels>, Option<DisplayId>)>,
 }
 
 #[derive(Clone)]
@@ -134,6 +136,7 @@ impl TestWindow {
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
+            bounds_requests: Vec::new(),
         })))
     }
     pub fn simulate_scheduled_frame(&self) -> bool {
@@ -296,6 +299,11 @@ impl TestWindow {
     pub fn set_start_external_drag_result(&self, result: bool) {
         self.0.lock().start_external_drag_result = result;
     }
+
+    /// Every bounds and display passed to `set_bounds`, oldest first.
+    pub fn bounds_requests(&self) -> Vec<(Bounds<Pixels>, Option<DisplayId>)> {
+        self.0.lock().bounds_requests.clone()
+    }
 }
 
 impl PlatformWindow for TestWindow {
@@ -350,6 +358,12 @@ impl PlatformWindow for TestWindow {
     fn resize(&mut self, size: Size<Pixels>) {
         let mut lock = self.0.lock();
         lock.bounds.size = size;
+    }
+
+    fn set_bounds(&mut self, bounds: Bounds<Pixels>, display_id: Option<DisplayId>) {
+        let mut lock = self.0.lock();
+        lock.bounds = bounds;
+        lock.bounds_requests.push((bounds, display_id));
     }
 
     fn scale_factor(&self) -> f32 {

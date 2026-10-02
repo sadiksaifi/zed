@@ -15,6 +15,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui): keep empty content masks empty when snapping`
 - `fix(gpui_macos): report glyph offsets in GPUI coordinates`
 - `test(gpui): record traffic light positions and export the macOS text system with test-support`
+- `feat(gpui): move and resize windows with set_bounds`
 
 ## Monthly rebase
 

@@ -1,9 +1,9 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
-    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DrawPhase, Drawable,
-    Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke,
-    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
+    BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DisplayId, DrawPhase,
+    Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Platform, PlatformTextSystem, Point, Render, Result, SharedString, Size,
     SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
     TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
     WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
@@ -500,6 +500,14 @@ impl TestAppContext {
     ) -> Vec<Point<Pixels>> {
         self.test_window(window_handle)
             .traffic_light_position_updates()
+    }
+
+    /// Returns every bounds and display the window was asked to use, oldest first.
+    pub fn window_bounds_requests(
+        &self,
+        window_handle: AnyWindowHandle,
+    ) -> Vec<(Bounds<Pixels>, Option<DisplayId>)> {
+        self.test_window(window_handle).bounds_requests()
     }
 
     /// Returns true if there's an alert dialog open.
