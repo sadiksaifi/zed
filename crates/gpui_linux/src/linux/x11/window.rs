@@ -638,6 +638,7 @@ impl X11WindowState {
                     | xproto::EventMask::FOCUS_CHANGE
                     | xproto::EventMask::KEY_PRESS
                     | xproto::EventMask::KEY_RELEASE
+                    | xproto::EventMask::KEYMAP_STATE
                     | xproto::EventMask::PROPERTY_CHANGE
                     | xproto::EventMask::VISIBILITY_CHANGE,
             );

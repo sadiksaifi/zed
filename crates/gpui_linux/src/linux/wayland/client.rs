@@ -15,7 +15,7 @@ use calloop::{
     timer::{TimeoutAction, Timer},
 };
 use calloop_wayland_source::WaylandSource;
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use filedescriptor::Pipe;
 use gpui_util::ResultExt as _;
 use http_client::Url;
@@ -346,6 +346,7 @@ pub(crate) struct WaylandClientState {
     wl_outputs: HashMap<ObjectId, wl_output::WlOutput>,
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
+    pressed_keys: HashSet<Keycode>,
     compose_state: Option<xkb::compose::State>,
     drag: DragState,
     external_drag: Option<ExternalDrag>,
@@ -1006,6 +1007,7 @@ impl WaylandClient {
             common,
             keyboard_layout: LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME),
             keymap_state: None,
+            pressed_keys: HashSet::default(),
             compose_state: None,
             drag: DragState {
                 data_offer: None,
@@ -1808,7 +1810,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
                     wl_keyboard.release();
                 }
 
+                state.pressed_keys.clear();
                 state.wl_keyboard = Some(keyboard);
+            } else {
+                state.pressed_keys.clear();
             }
             if capabilities.contains(wl_seat::Capability::Pointer) {
                 let pointer = seat.get_pointer(qh, ());
@@ -1890,7 +1895,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
 
                 this.handle_keyboard_layout_change();
             }
-            wl_keyboard::Event::Enter { surface, .. } => {
+            wl_keyboard::Event::Enter { surface, keys, .. } => {
+                state.pressed_keys = keys
+                    .chunks_exact(4)
+                    .filter_map(|bytes| bytes.try_into().ok())
+                    .map(u32::from_ne_bytes)
+                    .filter_map(|key| key.checked_add(MIN_KEYCODE))
+                    .map(Keycode::new)
+                    .collect();
                 state.keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.enter_token = Some(());
 
@@ -1902,6 +1914,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
             wl_keyboard::Event::Leave { surface, .. } => {
                 let keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.keyboard_focused_window = None;
+                state.pressed_keys.clear();
                 state.enter_token.take();
                 // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
                 state.repeat.current_id += 1;
@@ -1965,8 +1978,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     return;
                 };
 
-                let keymap_state = state.keymap_state.as_ref().unwrap();
                 let keycode = Keycode::from(key + MIN_KEYCODE);
+                match key_state {
+                    wl_keyboard::KeyState::Pressed => {
+                        state.pressed_keys.insert(keycode);
+                    }
+                    wl_keyboard::KeyState::Released => {
+                        state.pressed_keys.remove(&keycode);
+                    }
+                    _ => return,
+                }
+                let keymap_state = state.keymap_state.as_ref().unwrap();
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
                 if keysym.is_modifier_key() {
@@ -1977,7 +1999,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     };
                     // The compositor reports the resulting modifier state separately, after
                     // this key event.
-                    let native = modifier_key_event(keymap_state, keycode, pressed);
+                    let native = modifier_key_event(
+                        keymap_state,
+                        keycode,
+                        pressed,
+                        state.pressed_keys.iter().copied(),
+                    );
                     drop(state);
                     focused_window.handle_native_key_input(
                         PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),

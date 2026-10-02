@@ -1078,6 +1078,13 @@ impl X11Client {
                     self.handle_keyboard_layout_change();
                 }
             }
+            Event::KeymapNotify(event) => {
+                // Ordered after FocusIn or EnterNotify, before subsequent key transitions.
+                self.0
+                    .borrow_mut()
+                    .pressed_keys
+                    .replace_from_keymap(&event.keys);
+            }
             Event::KeyPress(event) => {
                 let window = self.get_window(event.event)?;
                 let mut state = self.0.borrow_mut();
@@ -1095,7 +1102,8 @@ impl X11Client {
                     if is_held {
                         return Some(());
                     }
-                    let native = modifier_key_event(&key_event_state, code, true);
+                    let native =
+                        modifier_key_event(&key_event_state, code, true, state.pressed_keys.iter());
                     drop(state);
                     window.handle_native_key_input(
                         PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
@@ -1151,7 +1159,12 @@ impl X11Client {
                 let keysym = key_event_state.key_get_one_sym(code);
 
                 if keysym.is_modifier_key() {
-                    let native = modifier_key_event(&key_event_state, code, false);
+                    let native = modifier_key_event(
+                        &key_event_state,
+                        code,
+                        false,
+                        state.pressed_keys.iter(),
+                    );
                     drop(state);
                     window.handle_native_key_input(
                         PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
@@ -2930,6 +2943,27 @@ impl PressedKeys {
         self.0 = [0; 4];
     }
 
+    fn iter(&self) -> impl Iterator<Item = xkbc::Keycode> + '_ {
+        (0..=u8::MAX)
+            .filter(move |&keycode| {
+                let (word, bit) = Self::position(keycode);
+                self.0[word] & bit != 0
+            })
+            .map(|keycode| xkbc::Keycode::new(u32::from(keycode)))
+    }
+
+    fn replace_from_keymap(&mut self, keys: &[u8; 31]) {
+        self.clear();
+        for (index, &bits) in keys.iter().enumerate() {
+            for bit in 0..8 {
+                if bits & (1 << bit) != 0 {
+                    // KeymapNotify omits the first byte, for unused keycodes 0 through 7.
+                    self.press(((index + 1) * 8 + bit) as u8);
+                }
+            }
+        }
+    }
+
     fn position(keycode: xproto::Keycode) -> (usize, u64) {
         (usize::from(keycode / 64), 1 << (keycode % 64))
     }
@@ -2988,6 +3022,27 @@ mod tests {
         pressed_keys.clear();
         assert!(!pressed_keys.press(38));
         assert!(!pressed_keys.press(255));
+    }
+
+    #[test]
+    fn focus_keymap_restores_held_keys_and_replaces_stale_presses() {
+        let mut pressed_keys = PressedKeys::default();
+        pressed_keys.press(38);
+        let mut snapshot = [0; 31];
+        for code in [8_u8, 50, 62, 255] {
+            snapshot[usize::from(code / 8 - 1)] |= 1 << (code % 8);
+        }
+        pressed_keys.replace_from_keymap(&snapshot);
+        assert_eq!(
+            pressed_keys.iter().map(|key| key.raw()).collect::<Vec<_>>(),
+            [8, 50, 62, 255],
+        );
+        assert!(!pressed_keys.press(38));
+        assert!(pressed_keys.press(62));
+        pressed_keys.release(50);
+        assert!(pressed_keys.iter().any(|key| key.raw() == 62));
+        pressed_keys.replace_from_keymap(&[0; 31]);
+        assert_eq!(pressed_keys.iter().count(), 0);
     }
 
     fn test_keymap(layouts: &str) -> xkbc::Keymap {
