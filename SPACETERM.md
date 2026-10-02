@@ -101,8 +101,9 @@ cargo check -p gpui_platform --features wayland,x11,font-kit
 cargo test -p gpui --lib --features test-support
 cargo test -p gpui_linux --features wayland,x11
 cargo clippy -p gpui -p gpui_linux -p gpui_wgpu -p gpui_platform --all-targets --features gpui/test-support,gpui_linux/wayland,gpui_linux/x11 -- -D warnings
-cargo clippy -p gpui_linux --no-default-features --features wayland -- -D warnings
-cargo clippy -p gpui_linux --no-default-features -- -D warnings
+cargo clippy -p gpui_linux --all-targets --no-default-features --features wayland -- -D warnings
+cargo clippy -p gpui_linux --all-targets --no-default-features --features x11 -- -D warnings
+cargo clippy -p gpui_linux --all-targets --no-default-features -- -D warnings
 ```
 
 The `gpui_wgpu` headless renderer tests need a GPU adapter. Without a GPU, Mesa lavapipe provides a
