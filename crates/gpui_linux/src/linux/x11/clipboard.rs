@@ -145,9 +145,7 @@ impl XContext {
     fn new() -> Result<Self> {
         // create a new connection to an X11 server
         let (conn, screen_num): (RustConnection, _) =
-            RustConnection::connect(None).map_err(|_| {
-                Error::unknown("X11 server connection timed out because it was unreachable")
-            })?;
+            RustConnection::connect(None).map_err(|_| Error::ConnectionFailed)?;
         let screen = conn
             .setup()
             .roots
@@ -1236,6 +1234,7 @@ pub(crate) enum WaitConfig {
 #[non_exhaustive]
 pub enum Error {
     Transfer(TransferError),
+    ConnectionFailed,
     /// The clipboard contents were not available in the requested format.
     /// This could either be due to the clipboard being empty or the clipboard contents having
     /// an incompatible format to the requested one (eg when calling `get_image` on text)
@@ -1269,6 +1268,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Transfer(error) => std::fmt::Display::fmt(error, f),
+            Error::ConnectionFailed => f.write_str("Could not connect to the X11 clipboard server."),
 			Error::ContentNotAvailable => f.write_str("The clipboard contents were not available in the requested format or the clipboard is empty."),
 			Error::ClipboardOccupied => f.write_str("The native clipboard is not accessible due to being held by an other party."),
 			Error::ConversionFailure => f.write_str("The image or the text that was about the be transferred to/from the clipboard could not be converted to the appropriate format."),
@@ -1293,6 +1293,7 @@ impl std::fmt::Debug for Error {
 		}
         let name = kind_to_str!(
             Transfer(_),
+            ConnectionFailed,
             ContentNotAvailable,
             ClipboardOccupied,
             ConversionFailure,
@@ -1316,7 +1317,10 @@ mod tests {
     use crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES;
     use x11rb::protocol::xproto::ChangeWindowAttributesAux;
 
-    static DISPLAY_TEST: Mutex<()> = parking_lot::const_mutex(());
+    // Keep one client alive for the native fixtures. Otherwise closing every transient owner
+    // and requestor lets Xvfb reset, racing the next fixture's connection handshake.
+    static DISPLAY_TEST: std::sync::LazyLock<Mutex<Arc<Inner>>> =
+        std::sync::LazyLock::new(|| Mutex::new(Arc::new(Inner::new().unwrap())));
 
     enum Offer {
         Mixed { files: bool },
@@ -1549,17 +1553,13 @@ mod tests {
         }
     }
 
-    fn clipboard() -> Clipboard {
-        Clipboard {
-            inner: Arc::new(Inner::new().unwrap()),
-        }
-    }
-
     #[test]
     #[ignore = "requires a private X11 display"]
     fn external_mixed_offers_prefer_text_and_preserve_file_precedence() {
-        let _display = DISPLAY_TEST.lock();
-        let clipboard = clipboard();
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
         for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
             let owner = Owner::new(selection, Offer::Mixed { files: false });
             assert_eq!(
@@ -1577,8 +1577,7 @@ mod tests {
         }
     }
 
-    fn read_external(offer: Offer, timeout: Duration) -> Result<ClipboardData> {
-        let inner = Inner::new().unwrap();
+    fn read_external(inner: &Inner, offer: Offer, timeout: Duration) -> Result<ClipboardData> {
         let _owner = Owner::new(ClipboardKind::Clipboard, offer);
         inner.read(
             &[inner.atoms.UTF8_STRING],
@@ -1590,8 +1589,13 @@ mod tests {
     #[test]
     #[ignore = "requires a private X11 display"]
     fn external_direct_and_incremental_transfers_are_bounded() {
-        let _display = DISPLAY_TEST.lock();
-        let data = read_external(Offer::Incremental(128 * 1024), CLIPBOARD_READ_TIMEOUT).unwrap();
+        let inner = DISPLAY_TEST.lock();
+        let data = read_external(
+            &inner,
+            Offer::Incremental(128 * 1024),
+            CLIPBOARD_READ_TIMEOUT,
+        )
+        .unwrap();
         assert_eq!(data.bytes, vec![b'x'; 128 * 1024]);
         for offer in [
             Offer::Direct(MAX_CLIPBOARD_BYTES + 1),
@@ -1599,19 +1603,27 @@ mod tests {
             Offer::LargeHint,
         ] {
             assert!(matches!(
-                read_external(offer, CLIPBOARD_READ_TIMEOUT),
+                read_external(&inner, offer, CLIPBOARD_READ_TIMEOUT),
                 Err(Error::Transfer(TransferError::TooLarge))
             ));
         }
+        // Rejected owners must not leave the client's next valid transfer unusable.
+        let data = read_external(
+            &inner,
+            Offer::Incremental(128 * 1024),
+            CLIPBOARD_READ_TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(data.bytes, vec![b'x'; 128 * 1024]);
     }
 
     #[test]
     #[ignore = "requires a private X11 display"]
     fn external_trickling_owner_cannot_renew_deadline() {
-        let _display = DISPLAY_TEST.lock();
+        let inner = DISPLAY_TEST.lock();
         let started = Instant::now();
         assert!(matches!(
-            read_external(Offer::Trickle, Duration::from_millis(100)),
+            read_external(&inner, Offer::Trickle, Duration::from_millis(100)),
             Err(Error::Transfer(TransferError::TimedOut))
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
