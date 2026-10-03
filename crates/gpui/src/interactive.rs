@@ -1,9 +1,9 @@
 use crate::{
-    Bounds, Capslock, Context, Empty, IntoElement, Keystroke, LongPressEvent, Modifiers, Pixels,
-    Point, Render, TouchDragEvent, Window, point, seal::Sealed,
+    Bounds, Capslock, Context, Empty, Image, IntoElement, Keystroke, LongPressEvent, Modifiers,
+    Pixels, Point, Render, Size, TouchDragEvent, Window, point, seal::Sealed,
 };
 use smallvec::SmallVec;
-use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf};
+use std::{any::Any, fmt::Debug, ops::Deref, path::PathBuf, sync::Arc};
 
 /// An event from a platform input source.
 pub trait InputEvent: Sealed + 'static {
@@ -763,13 +763,13 @@ impl FileDragPaths {
     }
 
     /// How the platform draws each dragged path.
-    pub fn icon(&self) -> FileDragIcon {
-        self.icon
+    pub fn icon(&self) -> &FileDragIcon {
+        &self.icon
     }
 }
 
 /// How the platform draws each path of a native file drag.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub enum FileDragIcon {
     /// A small generic icon for the path's file type. Resolving it never touches the file
     /// system, so it suits large selections and slow volumes.
@@ -780,6 +780,17 @@ pub enum FileDragIcon {
     File {
         /// The icon's width and height.
         size: Pixels,
+    },
+    /// An image the caller draws, such as a copy of the dragged element. The platform keeps the
+    /// image at the same place under the pointer as the drag leaves the window, so the element
+    /// itself seems to follow the pointer.
+    Image {
+        /// The image, drawn at `size` points.
+        image: Arc<Image>,
+        /// The image's width and height.
+        size: Size<Pixels>,
+        /// The pointer's position within the image when the drag began.
+        cursor_offset: Point<Pixels>,
     },
 }
 
