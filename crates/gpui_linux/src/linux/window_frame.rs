@@ -44,3 +44,33 @@ mod tests {
         }
     }
 }
+
+/// An explicit client decoration request remains authoritative across protocol configure events.
+#[cfg(feature = "wayland")]
+pub(crate) fn configured_decorations(
+    requested: WindowDecorations,
+    configured: WindowDecorations,
+) -> WindowDecorations {
+    if requested == WindowDecorations::Client {
+        WindowDecorations::Client
+    } else {
+        configured
+    }
+}
+
+#[cfg(all(test, feature = "wayland"))]
+#[test]
+fn explicit_client_decorations_never_accept_server_mode() {
+    assert_eq!(
+        configured_decorations(WindowDecorations::Client, WindowDecorations::Server),
+        WindowDecorations::Client
+    );
+    assert_eq!(
+        configured_decorations(WindowDecorations::Client, WindowDecorations::Client),
+        WindowDecorations::Client
+    );
+    assert_eq!(
+        configured_decorations(WindowDecorations::Server, WindowDecorations::Server),
+        WindowDecorations::Server
+    );
+}

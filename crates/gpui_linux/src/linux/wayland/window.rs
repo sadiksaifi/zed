@@ -120,6 +120,7 @@ pub struct WaylandWindowState {
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
     decorations: WindowDecorations,
+    requested_decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
     maximized: bool,
@@ -622,6 +623,7 @@ impl WaylandWindowState {
             scale: 1.0,
             input_handler: None,
             decorations: WindowDecorations::Client,
+            requested_decorations: options.window_decorations,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
             maximized: false,
@@ -1231,6 +1233,10 @@ impl WaylandWindowStatePtr {
                     return;
                 }
             };
+            let decorations = crate::linux::window_frame::configured_decorations(
+                self.state.borrow().requested_decorations,
+                decorations,
+            );
             let size = self.state.borrow_mut().set_decoration_mode(decorations);
             if let Some(size) = size {
                 self.resize(size);
@@ -2266,6 +2272,7 @@ impl PlatformWindow for WaylandWindow {
 
     fn request_decorations(&self, decorations: WindowDecorations) {
         let mut state = self.borrow_mut();
+        state.requested_decorations = decorations;
         match state.surface_state.decoration().as_ref() {
             Some(decoration) => {
                 decoration.set_mode(decorations.to_xdg());
