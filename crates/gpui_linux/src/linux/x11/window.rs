@@ -2,6 +2,7 @@ use anyhow::{Context as _, anyhow};
 use x11rb::connection::RequestConnection;
 
 use crate::linux::{TitlebarDoubleClickAction, X11ClientStatePtr};
+use gpui::MouseButton;
 use gpui::{
     AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
     NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
@@ -2024,20 +2025,36 @@ impl PlatformWindow for X11Window {
     }
 
     fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
-        let Some(action) = self
-            .0
-            .state
-            .borrow()
-            .client
-            .get_client()
-            .map(|client| client.0.borrow().common.titlebar_double_click_action)
-        else {
+        self.titlebar_click(
+            MouseButton::Left,
+            self.mouse_position(),
+            is_resizable,
+            is_minimizable,
+        );
+    }
+
+    fn titlebar_click(
+        &self,
+        button: MouseButton,
+        position: Point<Pixels>,
+        is_resizable: bool,
+        is_minimizable: bool,
+    ) {
+        let Some(action) = self.0.state.borrow().client.get_client().map(|client| {
+            let client = client.0.borrow();
+            match button {
+                MouseButton::Left => client.common.titlebar_double_click_action,
+                MouseButton::Middle => client.common.titlebar_middle_click_action,
+                MouseButton::Right => client.common.titlebar_right_click_action,
+                _ => TitlebarDoubleClickAction::None,
+            }
+        }) else {
             return;
         };
         match action.for_window(is_resizable, is_minimizable) {
             TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
             TitlebarDoubleClickAction::Minimize => self.minimize(),
-            TitlebarDoubleClickAction::Menu => self.show_window_menu(self.mouse_position()),
+            TitlebarDoubleClickAction::Menu => self.show_window_menu(position),
             TitlebarDoubleClickAction::Lower => self.lower(),
             TitlebarDoubleClickAction::None => {}
         }

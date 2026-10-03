@@ -951,9 +951,13 @@ impl WaylandClient {
                     }
                     XDPEvent::ButtonLayout(layout_str) => {
                         if let Some(client) = client.0.upgrade() {
-                            let layout = WindowButtonLayout::parse(&layout_str)
-                                .log_err()
-                                .unwrap_or_else(WindowButtonLayout::linux_default);
+                            let layout = match WindowButtonLayout::parse(&layout_str) {
+                                Ok(layout) => layout,
+                                Err(_) => {
+                                    log::warn!("Invalid desktop button layout");
+                                    return;
+                                }
+                            };
                             let mut client = client.borrow_mut();
                             client.common.button_layout = layout;
 
@@ -962,9 +966,21 @@ impl WaylandClient {
                             }
                         }
                     }
-                    XDPEvent::TitlebarDoubleClickAction(action) => {
+                    XDPEvent::TitlebarClickAction(button, action) => {
                         if let Some(client) = client.0.upgrade() {
-                            client.borrow_mut().common.titlebar_double_click_action = action;
+                            let mut client = client.borrow_mut();
+                            match button {
+                                MouseButton::Left => {
+                                    client.common.titlebar_double_click_action = action
+                                }
+                                MouseButton::Middle => {
+                                    client.common.titlebar_middle_click_action = action
+                                }
+                                MouseButton::Right => {
+                                    client.common.titlebar_right_click_action = action
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     XDPEvent::CursorTheme(theme) => {

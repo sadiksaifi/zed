@@ -65,6 +65,9 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): suppress releases intercepted by Wayland input methods`
 - `fix(gpui_linux): preserve clipboard fixtures across X11 transfers`
 
+- `feat(gpui_linux): follow native titlebar click actions and live KDE window settings`
+- `fix(gpui_linux): retain explicitly requested client decorations on Wayland`
+
 ## Monthly rebase
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.

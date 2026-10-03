@@ -24,6 +24,17 @@ use std::{
 /// assert what the application asked the platform to do.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TestWindowRequest {
+    /// A configured Linux titlebar pointer action was requested.
+    TitlebarClick {
+        /// The titlebar pointer button.
+        button: crate::MouseButton,
+        /// Pointer position in window coordinates.
+        position: Point<Pixels>,
+        /// Whether this window permits resizing.
+        is_resizable: bool,
+        /// Whether this window permits minimizing.
+        is_minimizable: bool,
+    },
     /// [`crate::Window::minimize_window`] was called.
     Minimize,
     /// [`crate::Window::zoom_window`] was called, or the window opened maximized.
@@ -648,6 +659,21 @@ impl PlatformWindow for TestWindow {
 
     fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
         self.record_request(TestWindowRequest::TitlebarDoubleClick {
+            is_resizable,
+            is_minimizable,
+        });
+    }
+
+    fn titlebar_click(
+        &self,
+        button: crate::MouseButton,
+        position: Point<Pixels>,
+        is_resizable: bool,
+        is_minimizable: bool,
+    ) {
+        self.record_request(TestWindowRequest::TitlebarClick {
+            button,
+            position,
             is_resizable,
             is_minimizable,
         });

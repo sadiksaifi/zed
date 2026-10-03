@@ -7143,6 +7143,26 @@ impl Window {
             .titlebar_double_click(self.is_resizable, self.is_minimizable);
     }
 
+    /// Performs the Linux desktop's configured middle-click titlebar action.
+    pub fn titlebar_middle_click(&self) {
+        self.platform_window.titlebar_click(
+            MouseButton::Middle,
+            self.mouse_position(),
+            self.is_resizable,
+            self.is_minimizable,
+        );
+    }
+
+    /// Performs the Linux desktop's configured right-click titlebar action.
+    pub fn titlebar_right_click(&self, position: Point<Pixels>) {
+        self.platform_window.titlebar_click(
+            MouseButton::Right,
+            position,
+            self.is_resizable,
+            self.is_minimizable,
+        );
+    }
+
     /// Gets the window's title at the platform level.
     /// This is macOS specific.
     pub fn window_title(&self) -> String {
@@ -10191,6 +10211,38 @@ mod tests {
                     is_minimizable: true,
                 },
             ]
+        );
+    }
+
+    #[gpui::test]
+    fn test_native_titlebar_clicks_forward_button_position_and_window_capabilities(
+        cx: &mut TestAppContext,
+    ) {
+        let handle = cx.add_window(|_, _| EmptyView);
+        let position = point(px(8.0), px(16.0));
+        cx.update_window(handle.into(), |_, window, _| {
+            window.titlebar_middle_click();
+            window.titlebar_right_click(position);
+        })
+        .unwrap();
+        let requests = cx.window_requests(handle.into());
+        assert!(matches!(
+            &requests[0],
+            crate::TestWindowRequest::TitlebarClick {
+                button: MouseButton::Middle,
+                is_resizable: true,
+                is_minimizable: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            requests[1],
+            crate::TestWindowRequest::TitlebarClick {
+                button: MouseButton::Right,
+                position,
+                is_resizable: true,
+                is_minimizable: true
+            }
         );
     }
 

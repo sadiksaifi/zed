@@ -7,7 +7,7 @@ use calloop::channel::Channel;
 use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
 use smol::stream::StreamExt;
 
-use gpui::{BackgroundExecutor, WindowAppearance};
+use gpui::{BackgroundExecutor, MouseButton, WindowAppearance};
 
 use crate::linux::TitlebarDoubleClickAction;
 
@@ -18,7 +18,7 @@ pub enum Event {
     #[cfg_attr(feature = "x11", allow(dead_code))]
     CursorSize(u32),
     ButtonLayout(String),
-    TitlebarDoubleClickAction(TitlebarDoubleClickAction),
+    TitlebarClickAction(MouseButton, TitlebarDoubleClickAction),
 }
 
 pub struct XDPEventSource {
@@ -30,6 +30,27 @@ impl XDPEventSource {
         let (sender, channel) = calloop::channel::channel();
 
         let background = executor.clone();
+        if super::desktop_window_settings::is_kde() {
+            let sender = sender.clone();
+            let timer = executor.clone();
+            executor
+                .spawn(async move {
+                    let mut previous = None;
+                    loop {
+                        let settings = super::desktop_window_settings::read();
+                        if previous.as_ref() != Some(&settings) {
+                            for event in settings.events() {
+                                sender.send(event)?;
+                            }
+                            previous = Some(settings);
+                        }
+                        timer.timer(std::time::Duration::from_secs(1)).await;
+                    }
+                    #[allow(unreachable_code)]
+                    anyhow::Ok(())
+                })
+                .detach();
+        }
 
         executor
             .spawn(async move {
@@ -55,23 +76,13 @@ impl XDPEventSource {
                     sender.send(Event::CursorSize(initial_size as u32))?;
                 }
 
-                if let Ok(initial_layout) = settings
-                    .read::<String>("org.gnome.desktop.wm.preferences", "button-layout")
-                    .await
-                {
-                    sender.send(Event::ButtonLayout(initial_layout))?;
-                }
-
-                if let Ok(initial_action) = settings
-                    .read::<String>(
-                        "org.gnome.desktop.wm.preferences",
-                        "action-double-click-titlebar",
-                    )
-                    .await
-                {
-                    sender.send(Event::TitlebarDoubleClickAction(
-                        TitlebarDoubleClickAction::parse(&initial_action),
-                    ))?;
+                if !crate::linux::desktop_window_settings::is_kde() {
+                    if let Ok(initial_layout) = settings
+                        .read::<String>("org.gnome.desktop.wm.preferences", "button-layout")
+                        .await
+                    {
+                        sender.send(Event::ButtonLayout(initial_layout))?;
+                    }
                 }
 
                 if let Ok(mut cursor_theme_changed) = settings
@@ -112,44 +123,61 @@ impl XDPEventSource {
                         .detach();
                 }
 
-                if let Ok(mut button_layout_changed) = settings
-                    .receive_setting_changed_with_args(
-                        "org.gnome.desktop.wm.preferences",
-                        "button-layout",
-                    )
-                    .await
-                {
-                    let sender = sender.clone();
-                    background
-                        .spawn(async move {
-                            while let Some(layout) = button_layout_changed.next().await {
-                                let layout = layout?;
-                                sender.send(Event::ButtonLayout(layout))?;
-                            }
-                            anyhow::Ok(())
-                        })
-                        .detach();
-                }
+                if !crate::linux::desktop_window_settings::is_kde() {
+                    if let Ok(mut button_layout_changed) = settings
+                        .receive_setting_changed_with_args(
+                            "org.gnome.desktop.wm.preferences",
+                            "button-layout",
+                        )
+                        .await
+                    {
+                        let sender = sender.clone();
+                        background
+                            .spawn(async move {
+                                while let Some(layout) = button_layout_changed.next().await {
+                                    let layout = layout?;
+                                    sender.send(Event::ButtonLayout(layout))?;
+                                }
+                                anyhow::Ok(())
+                            })
+                            .detach();
+                    }
 
-                if let Ok(mut titlebar_action_changed) = settings
-                    .receive_setting_changed_with_args::<String>(
-                        "org.gnome.desktop.wm.preferences",
-                        "action-double-click-titlebar",
-                    )
-                    .await
-                {
-                    let sender = sender.clone();
-                    background
-                        .spawn(async move {
-                            while let Some(action) = titlebar_action_changed.next().await {
-                                let action = action?;
-                                sender.send(Event::TitlebarDoubleClickAction(
-                                    TitlebarDoubleClickAction::parse(&action),
-                                ))?;
-                            }
-                            anyhow::Ok(())
-                        })
-                        .detach();
+                    for (key, button) in [
+                        ("action-double-click-titlebar", MouseButton::Left),
+                        ("action-middle-click-titlebar", MouseButton::Middle),
+                        ("action-right-click-titlebar", MouseButton::Right),
+                    ] {
+                        if let Ok(action) = settings
+                            .read::<String>("org.gnome.desktop.wm.preferences", key)
+                            .await
+                        {
+                            sender.send(Event::TitlebarClickAction(
+                                button,
+                                TitlebarDoubleClickAction::parse(&action),
+                            ))?;
+                        }
+                        if let Ok(mut changed) = settings
+                            .receive_setting_changed_with_args::<String>(
+                                "org.gnome.desktop.wm.preferences",
+                                key,
+                            )
+                            .await
+                        {
+                            let sender = sender.clone();
+                            background
+                                .spawn(async move {
+                                    while let Some(action) = changed.next().await {
+                                        sender.send(Event::TitlebarClickAction(
+                                            button,
+                                            TitlebarDoubleClickAction::parse(&action?),
+                                        ))?;
+                                    }
+                                    anyhow::Ok(())
+                                })
+                                .detach();
+                        }
+                    }
                 }
 
                 let mut appearance_changed = settings.receive_color_scheme_changed().await?;

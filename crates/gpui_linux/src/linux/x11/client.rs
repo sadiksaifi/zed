@@ -532,16 +532,25 @@ impl X11Client {
                         }
                     }
                     XDPEvent::ButtonLayout(layout_str) => {
-                        let layout = WindowButtonLayout::parse(&layout_str)
-                            .log_err()
-                            .unwrap_or_else(WindowButtonLayout::linux_default);
+                        let layout = match WindowButtonLayout::parse(&layout_str) {
+                            Ok(layout) => layout,
+                            Err(_) => {
+                                log::warn!("Invalid desktop button layout");
+                                return;
+                            }
+                        };
                         client.with_common(|common| common.button_layout = layout);
                         for window in client.0.borrow_mut().windows.values_mut() {
                             window.window.set_button_layout();
                         }
                     }
-                    XDPEvent::TitlebarDoubleClickAction(action) => {
-                        client.with_common(|common| common.titlebar_double_click_action = action);
+                    XDPEvent::TitlebarClickAction(button, action) => {
+                        client.with_common(|common| match button {
+                            MouseButton::Left => common.titlebar_double_click_action = action,
+                            MouseButton::Middle => common.titlebar_middle_click_action = action,
+                            MouseButton::Right => common.titlebar_right_click_action = action,
+                            _ => {}
+                        });
                     }
                     XDPEvent::CursorTheme(_) | XDPEvent::CursorSize(_) => {
                         // noop, X11 manages this for us.

@@ -35,6 +35,7 @@ use crate::linux::{
     Globals, Output, PendingActivation, TitlebarDoubleClickAction, WaylandClientStatePtr,
     get_window,
 };
+use gpui::MouseButton;
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload, GpuSpecs,
     Modifiers, NativeKeyEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
@@ -2150,19 +2151,44 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn titlebar_double_click(&self, is_resizable: bool, is_minimizable: bool) {
-        let action = self
-            .borrow()
-            .client
-            .get_client()
-            .borrow()
-            .common
-            .titlebar_double_click_action;
-        match action.for_window(is_resizable, is_minimizable) {
+        self.titlebar_click(
+            MouseButton::Left,
+            self.mouse_position(),
+            is_resizable,
+            is_minimizable,
+        );
+    }
+
+    fn titlebar_click(
+        &self,
+        button: MouseButton,
+        position: Point<Pixels>,
+        is_resizable: bool,
+        is_minimizable: bool,
+    ) {
+        let client = self.borrow().client.get_client();
+        let client = client.borrow();
+        let action = match button {
+            MouseButton::Left => client.common.titlebar_double_click_action,
+            MouseButton::Middle => client.common.titlebar_middle_click_action,
+            MouseButton::Right => client.common.titlebar_right_click_action,
+            _ => TitlebarDoubleClickAction::None,
+        };
+        drop(client);
+        let controls = self.window_controls();
+        match action.for_window(
+            is_resizable && controls.maximize,
+            is_minimizable && controls.minimize,
+        ) {
             TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
             TitlebarDoubleClickAction::Minimize => self.minimize(),
-            TitlebarDoubleClickAction::Menu => self.show_window_menu(self.mouse_position()),
+            TitlebarDoubleClickAction::Menu if controls.window_menu => {
+                self.show_window_menu(position)
+            }
             // Wayland clients cannot restack their windows.
-            TitlebarDoubleClickAction::Lower | TitlebarDoubleClickAction::None => {}
+            TitlebarDoubleClickAction::Menu
+            | TitlebarDoubleClickAction::Lower
+            | TitlebarDoubleClickAction::None => {}
         }
     }
 

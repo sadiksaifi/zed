@@ -4,6 +4,8 @@ mod clipboard_formats;
 mod clipboard_transfer;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod compose;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod desktop_window_settings;
 mod dispatcher;
 mod headless;
 mod keyboard;
@@ -13,10 +15,10 @@ mod system_notifications;
 mod text_system;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod titlebar_action;
-#[cfg(any(feature = "wayland", feature = "x11"))]
-mod window_frame;
 #[cfg(feature = "wayland")]
 mod wayland;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod window_frame;
 #[cfg(feature = "x11")]
 mod x11;
 
@@ -70,5 +72,21 @@ pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
         _ => unreachable!(
             r#"At least one of the "wayland" or "x11" features must be enabled on gpui_linux or gpui_platform."#
         ),
+    }
+}
+
+/// The desktop fallback is available even when the settings portal has no provider.
+pub(crate) fn desktop_button_layout() -> gpui::WindowButtonLayout {
+    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if desktops
+        .split(':')
+        .any(|desktop| desktop.eq_ignore_ascii_case("GNOME"))
+    {
+        gpui::WindowButtonLayout {
+            left: [None; 3],
+            right: [Some(gpui::WindowButton::Close), None, None],
+        }
+    } else {
+        gpui::WindowButtonLayout::linux_default()
     }
 }

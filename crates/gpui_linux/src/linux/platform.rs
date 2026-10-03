@@ -147,6 +147,10 @@ pub(crate) struct LinuxCommon {
     pub(crate) button_layout: WindowButtonLayout,
     #[cfg(any(feature = "wayland", feature = "x11"))]
     pub(crate) titlebar_double_click_action: TitlebarDoubleClickAction,
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    pub(crate) titlebar_middle_click_action: TitlebarDoubleClickAction,
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    pub(crate) titlebar_right_click_action: TitlebarDoubleClickAction,
     pub(crate) callbacks: PlatformHandlers,
     pub(crate) signal: LoopSignal,
     pub(crate) menus: Vec<OwnedMenu>,
@@ -190,9 +194,13 @@ impl LinuxCommon {
             text_system,
             appearance: WindowAppearance::Light,
             auto_hide_scrollbars: false,
-            button_layout: WindowButtonLayout::linux_default(),
+            button_layout: crate::linux::desktop_button_layout(),
             #[cfg(any(feature = "wayland", feature = "x11"))]
             titlebar_double_click_action: TitlebarDoubleClickAction::default(),
+            #[cfg(any(feature = "wayland", feature = "x11"))]
+            titlebar_middle_click_action: TitlebarDoubleClickAction::Lower,
+            #[cfg(any(feature = "wayland", feature = "x11"))]
+            titlebar_right_click_action: TitlebarDoubleClickAction::Menu,
             callbacks,
             signal,
             menus: Vec::new(),
