@@ -347,6 +347,7 @@ pub(crate) struct WaylandClientState {
     keyboard_layout: LinuxKeyboardLayout,
     keymap_state: Option<xkb::State>,
     pressed_keys: HashSet<Keycode>,
+    dispatched_key_presses: HashSet<Keycode>,
     compose_state: Option<xkb::compose::State>,
     compose_keys: ComposeKeys,
     drag: DragState,
@@ -1009,6 +1010,7 @@ impl WaylandClient {
             keyboard_layout: LinuxKeyboardLayout::new(UNKNOWN_KEYBOARD_LAYOUT_NAME),
             keymap_state: None,
             pressed_keys: HashSet::default(),
+            dispatched_key_presses: HashSet::default(),
             compose_state: None,
             compose_keys: ComposeKeys::default(),
             drag: DragState {
@@ -1792,6 +1794,7 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandClientStatePtr {
         {
             let client = state.get_client();
             let mut state = client.borrow_mut();
+            state.dispatched_key_presses.clear();
             if capabilities.contains(wl_seat::Capability::Keyboard) {
                 let keyboard = seat.get_keyboard(qh, ());
 
@@ -1917,6 +1920,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keyboard_focused_window = get_window(&mut state, &surface.id());
                 state.keyboard_focused_window = None;
                 state.pressed_keys.clear();
+                state.dispatched_key_presses.clear();
                 state.enter_token.take();
                 // Prevent keyboard events from repeating after opening e.g. a file chooser and closing it quickly
                 state.repeat.current_id += 1;
@@ -1975,12 +1979,19 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     state.serial_tracker.update(SerialKind::KeyPress, serial);
                 }
 
+                let keycode = Keycode::from(key + MIN_KEYCODE);
+                if key_state == wl_keyboard::KeyState::Pressed {
+                    state.dispatched_key_presses.remove(&keycode);
+                }
                 let focused_window = state.keyboard_focused_window.clone();
                 let Some(focused_window) = focused_window else {
+                    if key_state == wl_keyboard::KeyState::Released {
+                        state.compose_keys.release(keycode.raw());
+                        state.dispatched_key_presses.remove(&keycode);
+                    }
                     return;
                 };
 
-                let keycode = Keycode::from(key + MIN_KEYCODE);
                 match key_state {
                     wl_keyboard::KeyState::Pressed => {
                         state.pressed_keys.insert(keycode);
@@ -2023,6 +2034,17 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     return;
                 }
 
+                // A compositor's input method can intercept a press while still forwarding
+                // its release. Only native presses dispatched as keys can have key releases.
+                if key_state == wl_keyboard::KeyState::Released
+                    && !state.dispatched_key_presses.remove(&keycode)
+                {
+                    if state.repeat.current_keycode == Some(keycode) {
+                        state.repeat.current_keycode = None;
+                    }
+                    return;
+                }
+                let keymap_state = state.keymap_state.as_ref().unwrap();
                 let native = native_key_event(keymap_state, keycode);
                 match key_state {
                     wl_keyboard::KeyState::Pressed => {
@@ -2051,6 +2073,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                         let Some(keystroke) = keystroke else {
                             return;
                         };
+                        state.dispatched_key_presses.insert(keycode);
                         let input = PlatformInput::KeyDown(KeyDownEvent {
                             keystroke: keystroke.clone(),
                             is_held: false,

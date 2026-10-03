@@ -64,6 +64,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): bound clipboard reads and prefer text alternates`
 
 - `fix(gpui_linux): suppress physical key events consumed by Compose`
+- `fix(gpui_linux): suppress releases intercepted by Wayland input methods`
 
 ## Monthly rebase
 
