@@ -58,11 +58,9 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `feat(gpui): move and resize windows with set_bounds`
 - `feat(gpui): drag files with their own icons`
 - `feat(gpui): drag files as a caller-drawn image`
-- `fix(gpui_linux): preserve client frame geometry and input regions`
 - `feat(gpui): expose native interactive resize state`
-
+- `fix(gpui_linux): preserve client frame geometry and input regions`
 - `fix(gpui_linux): bound clipboard reads and prefer text alternates`
-
 - `fix(gpui_linux): suppress physical key events consumed by Compose`
 - `fix(gpui_linux): suppress releases intercepted by Wayland input methods`
 
