@@ -56,7 +56,7 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBeep, NSButton as Objc2NSButton, NSDraggingImageComponent,
-    NSDraggingImageComponentIconKey, NSDraggingItem, NSPasteboardWriting, NSTrackingArea,
+    NSDraggingImageComponentIconKey, NSDraggingItem, NSImage, NSPasteboardWriting, NSTrackingArea,
     NSTrackingAreaOptions, NSView as Objc2NSView, NSWindow as Objc2NSWindow,
     NSWindowButton as Objc2NSWindowButton, NSWorkspace,
 };
@@ -2349,14 +2349,44 @@ impl PlatformWindow for MacWindow {
             // AppKit keeps this frame's distance from the event's location as the drag image's
             // offset from the cursor, so it has to stay anchored on `event`.
             let location: cocoa::foundation::NSPoint = msg_send![event, locationInWindow];
-            let icon_size = match paths.icon() {
-                FileDragIcon::FileType => 32.,
-                FileDragIcon::File { size } => f64::from(size.as_f32()),
+            // The view is not flipped, so a cursor offset measured from an image's top edge is
+            // measured down from the frame's top.
+            let (image_size, cursor_offset) = match paths.icon() {
+                FileDragIcon::FileType => (NSSize::new(32., 32.), NSPoint::new(16., 16.)),
+                FileDragIcon::File { size } => {
+                    let size = f64::from(size.as_f32());
+                    (NSSize::new(size, size), NSPoint::new(size / 2., size / 2.))
+                }
+                FileDragIcon::Image {
+                    size,
+                    cursor_offset,
+                    ..
+                } => (
+                    NSSize::new(
+                        f64::from(size.width.as_f32()),
+                        f64::from(size.height.as_f32()),
+                    ),
+                    NSPoint::new(
+                        f64::from(cursor_offset.x.as_f32()),
+                        f64::from((size.height - cursor_offset.y).as_f32()),
+                    ),
+                ),
             };
             let frame = NSRect::new(
-                NSPoint::new(location.x - icon_size / 2., location.y - icon_size / 2.),
-                NSSize::new(icon_size, icon_size),
+                NSPoint::new(location.x - cursor_offset.x, location.y - cursor_offset.y),
+                image_size,
             );
+            let drawn_image = match paths.icon() {
+                FileDragIcon::Image { image, .. } => {
+                    let data = objc2_foundation::NSData::with_bytes(&image.bytes);
+                    let drawn = NSImage::initWithData(NSImage::alloc(), &data);
+                    if let Some(drawn) = &drawn {
+                        drawn.setSize(image_size);
+                    }
+                    drawn
+                }
+                FileDragIcon::FileType | FileDragIcon::File { .. } => None,
+            };
 
             for (path, is_directory) in paths.entries() {
                 // Preserve non-UTF-8 paths
@@ -2398,6 +2428,12 @@ impl PlatformWindow for MacWindow {
                         Some(path) => DragIconSource::File(path),
                         None => DragIconSource::FileType("public.data".to_string()),
                     },
+                    // An image that cannot be decoded falls back to the path's own icon.
+                    FileDragIcon::Image { .. } => match (&drawn_image, url.path()) {
+                        (Some(image), _) => DragIconSource::Image(image.clone()),
+                        (None, Some(path)) => DragIconSource::File(path),
+                        (None, None) => DragIconSource::FileType("public.data".to_string()),
+                    },
                 };
                 let provider = RcBlock::new(move || {
                     let component = NSDraggingImageComponent::draggingImageComponentWithKey(
@@ -2412,14 +2448,12 @@ impl PlatformWindow for MacWindow {
                             workspace.iconForFileType(&file_type)
                         }
                         DragIconSource::File(path) => workspace.iconForFile(path),
+                        DragIconSource::Image(image) => image.clone(),
                     };
-                    icon.setSize(NSSize::new(icon_size, icon_size));
+                    icon.setSize(image_size);
                     component.setContents(Some(&icon));
                     // Component frames are relative to the item's dragging frame.
-                    component.setFrame(NSRect::new(
-                        NSPoint::new(0., 0.),
-                        NSSize::new(icon_size, icon_size),
-                    ));
+                    component.setFrame(NSRect::new(NSPoint::new(0., 0.), image_size));
                     let components = NSArray::from_slice(&[&*component]);
                     NonNull::new_unchecked(Retained::autorelease_return(components))
                 });
@@ -3822,6 +3856,8 @@ enum DragIconSource {
     FileType(String),
     /// The file's own path.
     File(Retained<objc2_foundation::NSString>),
+    /// An image the caller drew.
+    Image(Retained<NSImage>),
 }
 
 extern "C" fn dragging_session_source_operation_mask(
