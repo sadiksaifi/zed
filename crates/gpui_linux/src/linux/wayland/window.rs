@@ -53,6 +53,7 @@ pub(crate) struct Callbacks {
     request_frame: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     input: Option<Box<dyn FnMut(gpui::PlatformInput) -> gpui::DispatchEventResult>>,
     active_status_change: Option<Box<dyn FnMut(bool)>>,
+    live_resize_change: Option<Box<dyn FnMut(bool)>>,
     visibility_change: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change: Option<Box<dyn FnMut(bool)>>,
     resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
@@ -134,6 +135,7 @@ pub struct WaylandWindowState {
     presentation: PresentationState,
     pending_frame_callback: Option<wl_callback::WlCallback>,
     in_progress_configure: Option<InProgressConfigure>,
+    live_resizing: bool,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
@@ -620,6 +622,7 @@ impl WaylandWindowState {
             tiling: Tiling::default(),
             window_bounds: options.bounds,
             in_progress_configure: None,
+            live_resizing: false,
             resize_throttle: false,
             client,
             appearance,
@@ -1119,6 +1122,8 @@ impl WaylandWindowStatePtr {
                     state.fullscreen = configure.fullscreen;
                     state.maximized = configure.maximized;
                     state.tiling = configure.tiling;
+                    let resize_changed = state.live_resizing != configure.resizing;
+                    state.live_resizing = configure.resizing;
                     let visibility_changed = state.visibility != configure.visibility;
                     state.visibility = configure.visibility;
                     // Limit interactive resizes to once per vblank
@@ -1146,6 +1151,13 @@ impl WaylandWindowStatePtr {
                     drop(state);
                     if visibility_changed {
                         self.report_visibility(configure.visibility);
+                    }
+                    if resize_changed {
+                        let callback = self.callbacks.borrow_mut().live_resize_change.take();
+                        if let Some(mut callback) = callback {
+                            callback(configure.resizing);
+                            self.callbacks.borrow_mut().live_resize_change = Some(callback);
+                        }
                     }
                     if throttled {
                         return;
@@ -2015,6 +2027,13 @@ impl PlatformWindow for WaylandWindow {
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.callbacks.borrow_mut().active_status_change = Some(callback);
+    }
+
+    fn is_live_resizing(&self) -> bool {
+        self.borrow().live_resizing
+    }
+    fn on_live_resize_change(&self, callback: Box<dyn FnMut(bool)>) {
+        self.0.callbacks.borrow_mut().live_resize_change = Some(callback);
     }
 
     fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {

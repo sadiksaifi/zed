@@ -474,6 +474,16 @@ impl TestAppContext {
             .simulate_visibility_change(visibility);
     }
 
+    /// Simulates a native interactive-resize transition.
+    pub fn simulate_window_live_resize_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        resizing: bool,
+    ) {
+        self.test_window(window_handle)
+            .simulate_live_resize_change(resizing);
+    }
+
     /// Simulates visible viewport changes without resizing the window's layout area.
     pub fn simulate_window_visual_viewport_change(
         &self,

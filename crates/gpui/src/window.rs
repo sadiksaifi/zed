@@ -1211,6 +1211,7 @@ pub struct Window {
     pub(crate) button_layout_observers: SubscriberSet<(), AnyObserver>,
     active: Rc<Cell<bool>>,
     visibility: WindowVisibility,
+    live_resize_observers: SubscriberSet<(), Box<dyn FnMut(bool, &mut Window, &mut App) -> bool>>,
     pub(crate) visibility_observers:
         SubscriberSet<(), Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
     hovered: Rc<Cell<bool>>,
@@ -1921,6 +1922,20 @@ impl Window {
                     .log_err();
             }
         }));
+        platform_window.on_live_resize_change(Box::new({
+            let mut cx = cx.to_async();
+            move |resizing| {
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        window
+                            .live_resize_observers
+                            .clone()
+                            .retain(&(), |callback| callback(resizing, window, cx));
+                        window.refresh();
+                    })
+                    .log_err();
+            }
+        }));
         platform_window.on_visibility_change(Box::new({
             let mut cx = cx.to_async();
             move |_| {
@@ -2078,6 +2093,7 @@ impl Window {
             button_layout_observers: SubscriberSet::new(),
             active,
             visibility,
+            live_resize_observers: SubscriberSet::new(),
             visibility_observers: SubscriberSet::new(),
             hovered,
             needs_present,
@@ -2193,6 +2209,27 @@ impl Window {
     /// [`WindowVisibility`]).
     pub fn visibility(&self) -> WindowVisibility {
         self.visibility
+    }
+
+    /// Whether the native window system is currently interactively resizing this window.
+    pub fn is_live_resizing(&self) -> bool {
+        self.platform_window.is_live_resizing()
+    }
+
+    /// Observes native interactive-resize transitions.
+    pub fn observe_live_resize(
+        &self,
+        mut callback: impl FnMut(bool, &mut Window, &mut App) + 'static,
+    ) -> Subscription {
+        let (subscription, activate) = self.live_resize_observers.insert(
+            (),
+            Box::new(move |resizing, window, cx| {
+                callback(resizing, window, cx);
+                true
+            }),
+        );
+        activate();
+        subscription
     }
 
     /// Whether frames drawn for this window will be shown.

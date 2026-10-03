@@ -1030,6 +1030,13 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Registers the callback invoked when [`Self::visibility`] changes. Only
     /// transitions are reported; the callback runs on the main thread outside
     /// of any window update.
+    /// Whether the native window system is currently interactively resizing this window.
+    fn is_live_resizing(&self) -> bool {
+        false
+    }
+    /// Registers native interactive-resize transitions. Unsupported platforms never invoke it.
+    fn on_live_resize_change(&self, _callback: Box<dyn FnMut(bool)>) {}
+
     fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);
     fn on_resize(&self, callback: Box<dyn FnMut(Size<Pixels>, f32)>);

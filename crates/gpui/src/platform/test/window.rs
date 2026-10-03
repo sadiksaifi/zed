@@ -60,6 +60,8 @@ pub(crate) struct TestWindowState {
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     native_key_event: Option<NativeKeyEvent>,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
+    live_resizing: bool,
+    live_resize_callback: Option<Box<dyn FnMut(bool)>>,
     visibility: WindowVisibility,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change_callback: Option<Box<dyn FnMut(bool)>>,
@@ -141,6 +143,8 @@ impl TestWindow {
             hit_test_window_control_callback: None,
             input_callback: None,
             active_status_change_callback: None,
+            live_resizing: false,
+            live_resize_callback: None,
             visibility: WindowVisibility::Visible,
             visibility_callback: None,
             hover_status_change_callback: None,
@@ -198,6 +202,21 @@ impl TestWindow {
 
     pub fn frame_scheduled(&self) -> bool {
         self.0.lock().frame_scheduled
+    }
+
+    pub fn simulate_live_resize_change(&self, resizing: bool) {
+        let callback = {
+            let mut state = self.0.lock();
+            if state.live_resizing == resizing {
+                return;
+            }
+            state.live_resizing = resizing;
+            state.live_resize_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback(resizing);
+            self.0.lock().live_resize_callback = Some(callback);
+        }
     }
 
     pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
@@ -660,6 +679,13 @@ impl PlatformWindow for TestWindow {
 
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.lock().active_status_change_callback = Some(callback)
+    }
+
+    fn is_live_resizing(&self) -> bool {
+        self.0.lock().live_resizing
+    }
+    fn on_live_resize_change(&self, callback: Box<dyn FnMut(bool)>) {
+        self.0.lock().live_resize_callback = Some(callback);
     }
 
     fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
