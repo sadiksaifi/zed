@@ -47,10 +47,9 @@ pub(super) fn feed_compose(
                 .utf8()
                 .or_else(|| keystroke_underlying_dead_key(keysym))
                 .unwrap_or_default();
-            keystroke.key_char = None;
             ComposeStep {
                 text: vec![ComposeText::Mark(pre_edit.clone())],
-                key_down: Some(keystroke),
+                key_down: None,
                 pre_edit: Some(pre_edit),
             }
         }
@@ -92,8 +91,8 @@ pub(super) fn feed_compose(
                 None => text.push(ComposeText::Unmark),
             }
             ComposeStep {
+                key_down: pre_edit.is_none().then_some(keystroke),
                 text,
-                key_down: Some(keystroke),
                 pre_edit,
             }
         }
@@ -102,6 +101,38 @@ pub(super) fn feed_compose(
             key_down: Some(keystroke),
             pre_edit,
         },
+    }
+}
+
+/// Physical keys used for composed text stay consumed until release, even if focus moves.
+#[derive(Default)]
+pub(super) struct ComposeKeys {
+    consumed: Vec<u32>,
+}
+
+impl ComposeKeys {
+    pub fn press(&mut self, keycode: u32, repeated: bool, step: &ComposeStep) {
+        if !repeated {
+            self.consumed.retain(|&key| key != keycode);
+        }
+        if (step.pre_edit.is_some() || step.key_down.is_none()) && !self.consumed.contains(&keycode)
+        {
+            self.consumed.push(keycode);
+        }
+    }
+
+    #[cfg(feature = "x11")]
+    pub fn consumes(&self, keycode: u32) -> bool {
+        self.consumed.contains(&keycode)
+    }
+
+    pub fn release(&mut self, keycode: u32) -> bool {
+        if let Some(index) = self.consumed.iter().position(|&key| key == keycode) {
+            self.consumed.swap_remove(index);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -161,7 +192,7 @@ mod tests {
             None,
         );
         assert_eq!(step.text, [ComposeText::Mark("´".into())]);
-        assert_eq!(step.key_down, Some(keystroke("dead_acute", None)));
+        assert_eq!(step.key_down, None);
         assert_eq!(step.pre_edit.as_deref(), Some("´"));
     }
 
@@ -274,5 +305,54 @@ mod tests {
         assert_eq!(step.text, [ComposeText::DeleteMarked]);
         assert_eq!(step.key_down, Some(keystroke("F1", None)));
         assert_eq!(step.pre_edit, None);
+    }
+    #[test]
+    fn consumed_keys_suppress_releases_after_commit_and_focus_loss() {
+        let mut compose = compose_state();
+        let mut keys = ComposeKeys::default();
+        let step = feed_compose(
+            &mut compose,
+            Keysym::dead_acute,
+            keystroke("dead_acute", None),
+            None,
+        );
+        keys.press(48, false, &step);
+        assert_eq!(step.key_down, None);
+        assert!(keys.release(48));
+        let step = feed_compose(
+            &mut compose,
+            Keysym::e,
+            keystroke("e", Some("e")),
+            step.pre_edit,
+        );
+        keys.press(26, false, &step);
+        assert_eq!(
+            step.text,
+            [ComposeText::Insert("é".into()), ComposeText::Unmark]
+        );
+        // Focus loss cancels composition, but must not turn its held key into an ordinary release.
+        compose.reset();
+        assert!(keys.release(26));
+        assert!(!keys.release(26));
+        let step = feed_compose(&mut compose, Keysym::e, keystroke("e", Some("e")), None);
+        keys.press(26, false, &step);
+        assert!(!keys.release(26));
+    }
+
+    #[test]
+    fn fresh_press_retires_consumption_when_release_was_delivered_outside_the_app() {
+        let mut compose = compose_state();
+        let mut keys = ComposeKeys::default();
+        let step = feed_compose(
+            &mut compose,
+            Keysym::dead_acute,
+            keystroke("dead_acute", None),
+            None,
+        );
+        keys.press(48, false, &step);
+        compose.reset();
+        let step = feed_compose(&mut compose, Keysym::a, keystroke("a", Some("a")), None);
+        keys.press(48, false, &step);
+        assert!(!keys.release(48));
     }
 }

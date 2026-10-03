@@ -59,7 +59,7 @@ use crate::linux::{
 };
 use crate::linux::{
     LinuxCommon, LinuxKeyboardLayout, X11Window,
-    compose::{ComposeText, feed_compose},
+    compose::{ComposeKeys, ComposeText, feed_compose},
     modifiers_from_xinput_info,
     xkb_facts::{modifier_key_changed_event, modifier_key_event, native_key_event},
 };
@@ -232,6 +232,7 @@ pub struct X11ClientState {
     pub last_capslock_changed_event: Capslock,
 
     pub(crate) compose_state: Option<xkbc::compose::State>,
+    compose_keys: ComposeKeys,
     pub(crate) pre_edit_text: Option<String>,
     pub(crate) composing: bool,
     pub(crate) pre_key_char_down: Option<Keystroke>,
@@ -587,6 +588,7 @@ impl X11Client {
             xim_handler,
 
             compose_state,
+            compose_keys: ComposeKeys::default(),
             pre_edit_text: None,
             pre_key_char_down: None,
             pressed_keys: PressedKeys::default(),
@@ -1094,6 +1096,9 @@ impl X11Client {
                 state.modifiers = modifiers;
                 state.pre_key_char_down.take();
                 let is_held = state.pressed_keys.press(event.detail);
+                if is_held && state.compose_keys.consumes(u32::from(event.detail)) {
+                    return Some(());
+                }
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
                 let code = event.detail.into();
                 let keysym = key_event_state.key_get_one_sym(code);
@@ -1118,6 +1123,9 @@ impl X11Client {
                     Some(mut compose_state) => {
                         let pre_edit = state.pre_edit_text.take();
                         let step = feed_compose(&mut compose_state, keysym, keystroke, pre_edit);
+                        state
+                            .compose_keys
+                            .press(u32::from(event.detail), is_held, &step);
                         state.compose_state = Some(compose_state);
                         state.pre_edit_text = step.pre_edit;
                         drop(state);
@@ -1154,6 +1162,9 @@ impl X11Client {
                 let modifiers = modifiers_from_state(event.state);
                 state.modifiers = modifiers;
                 state.pressed_keys.release(event.detail);
+                if state.compose_keys.release(u32::from(event.detail)) {
+                    return Some(());
+                }
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
                 let code = event.detail.into();
                 let keysym = key_event_state.key_get_one_sym(code);

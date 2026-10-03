@@ -86,7 +86,7 @@ use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
     SCROLL_LINES, capslock_from_xkb,
     clipboard_formats::uri_list,
-    compose::{ComposeText, feed_compose},
+    compose::{ComposeKeys, ComposeText, feed_compose},
     cursor_style_to_icon_names, get_xkb_compose_state, is_within_click_distance,
     keystroke_from_xkb, modifiers_from_xkb, new_xkb_context, open_uri_internal,
     read_fd_with_timeout, reveal_path_internal,
@@ -348,6 +348,7 @@ pub(crate) struct WaylandClientState {
     keymap_state: Option<xkb::State>,
     pressed_keys: HashSet<Keycode>,
     compose_state: Option<xkb::compose::State>,
+    compose_keys: ComposeKeys,
     drag: DragState,
     external_drag: Option<ExternalDrag>,
     click: ClickState,
@@ -1009,6 +1010,7 @@ impl WaylandClient {
             keymap_state: None,
             pressed_keys: HashSet::default(),
             compose_state: None,
+            compose_keys: ComposeKeys::default(),
             drag: DragState {
                 data_offer: None,
                 window: None,
@@ -1988,6 +1990,14 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                     }
                     _ => return,
                 }
+                if key_state == wl_keyboard::KeyState::Released
+                    && state.compose_keys.release(keycode.raw())
+                {
+                    if state.repeat.current_keycode == Some(keycode) {
+                        state.repeat.current_keycode = None;
+                    }
+                    return;
+                }
                 let keymap_state = state.keymap_state.as_ref().unwrap();
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
@@ -2021,6 +2031,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                             Some(mut compose) => {
                                 let pre_edit = state.pre_edit_text.take();
                                 let step = feed_compose(&mut compose, keysym, keystroke, pre_edit);
+                                state.compose_keys.press(keycode.raw(), false, &step);
                                 state.compose_state = Some(compose);
                                 state.pre_edit_text = step.pre_edit;
                                 drop(state);
