@@ -55,7 +55,6 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_web): report unsupported window background effects`
 - `fix(gpui_linux): retain held modifiers when the other side releases`
 - `fix(gpui_linux): honor display backend feature gates`
-- `feat(gpui): drag files as a caller-drawn image`
 - `feat(gpui): expose native interactive resize state`
 - `fix(gpui_linux): preserve client frame geometry and input regions`
 - `fix(gpui_linux): bound clipboard reads and prefer text alternates`
@@ -74,6 +73,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 - `feat(gpui): move and resize windows with set_bounds`
 - `feat(gpui): drag files with their own icons`
+- `feat(gpui): drag files as a caller-drawn image`
 
 ## Monthly rebase
 
@@ -134,9 +134,10 @@ X11 window between separate screens is unsupported and logs a warning. Wayland a
 the size through the existing resize path; the compositor controls placement and output
 selection. Headless windows update their stored bounds, and test windows also record requests.
 
-Wayland native file drags transfer the file URI list without an icon surface, so the compositor
-chooses their appearance. X11 native outgoing file drags remain unsupported. The test platform
-records the complete drag payload, including the requested icon.
+Wayland native file drags transfer the file URI list without an icon surface, including when
+the caller requests a drawn image, so the compositor chooses their appearance. X11 native
+outgoing file drags remain unsupported. The test platform records the complete drag payload,
+including the requested icon.
 
 Wasm check, matching `.github/workflows/run_tests.yml`:
 
