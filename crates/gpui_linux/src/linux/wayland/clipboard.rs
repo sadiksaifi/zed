@@ -16,7 +16,8 @@ use crate::linux::{
         ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, HTML_MIME_TYPE, URI_LIST_MIME_TYPE,
         file_list_item, parse_gnome_copied_files, parse_uri_list,
     },
-    platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout},
+    clipboard_transfer::{CLIPBOARD_READ_TIMEOUT, ClipboardTransfer},
+    platform::read_fd_with_budget,
 };
 use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 
@@ -125,36 +126,46 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
-    fn read_bytes(&self, connection: &Connection, mime_type: &str) -> Option<Vec<u8>> {
-        let pipe = Pipe::new().unwrap();
+    fn read_bytes(
+        &self,
+        connection: &Connection,
+        mime_type: &str,
+        transfer: &mut ClipboardTransfer,
+    ) -> Option<Vec<u8>> {
+        transfer.remaining_time().ok()?;
+        let pipe = Pipe::new().ok()?;
         self.inner.receive_data(mime_type.to_string(), unsafe {
             BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
         });
         let fd = pipe.read;
         drop(pipe.write);
 
-        connection.flush().unwrap();
+        connection.flush().ok()?;
 
-        match read_fd_with_timeout(fd, PIPE_READ_TIMEOUT) {
+        match read_fd_with_budget(fd, transfer) {
             Ok(bytes) => Some(bytes),
-            Err(err) => {
-                log::error!("error reading clipboard pipe: {err:?}");
+            Err(_) => {
+                log::error!("clipboard transfer failed");
                 None
             }
         }
     }
 
-    fn read_string(&self, connection: &Connection) -> Option<String> {
+    fn read_string(
+        &self,
+        connection: &Connection,
+        transfer: &mut ClipboardTransfer,
+    ) -> Option<String> {
         let mime_type = self.mime_types.iter().find(|&mime_type| {
             ALLOWED_TEXT_MIME_TYPES
                 .iter()
                 .any(|&allowed| allowed == mime_type)
         })?;
-        let bytes = self.read_bytes(connection, mime_type)?;
+        let bytes = self.read_bytes(connection, mime_type, transfer)?;
         let text_content = match String::from_utf8(bytes) {
             Ok(content) => content,
-            Err(e) => {
-                log::error!("Failed to convert clipboard content to UTF-8: {}", e);
+            Err(_) => {
+                log::error!("clipboard text conversion failed");
                 return None;
             }
         };
@@ -165,12 +176,16 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(text_content.replace("\r\n", "\n"))
     }
 
-    fn read_file_paths(&self, connection: &Connection) -> Option<ExternalPaths> {
+    fn read_file_paths(
+        &self,
+        connection: &Connection,
+        transfer: &mut ClipboardTransfer,
+    ) -> Option<ExternalPaths> {
         if self.has_mime_type(URI_LIST_MIME_TYPE) {
-            let bytes = self.read_bytes(connection, URI_LIST_MIME_TYPE)?;
+            let bytes = self.read_bytes(connection, URI_LIST_MIME_TYPE, transfer)?;
             parse_uri_list(&bytes)
         } else if self.has_mime_type(GNOME_COPIED_FILES_MIME_TYPE) {
-            let bytes = self.read_bytes(connection, GNOME_COPIED_FILES_MIME_TYPE)?;
+            let bytes = self.read_bytes(connection, GNOME_COPIED_FILES_MIME_TYPE, transfer)?;
             parse_gnome_copied_files(&bytes)
         } else {
             None
@@ -179,22 +194,30 @@ impl<T: ReceiveData> DataOffer<T> {
 
     /// Reads the offer as a file list, then text, then an image.
     fn read_item(&self, connection: &Connection) -> Option<ClipboardItem> {
-        if let Some(paths) = self.read_file_paths(connection) {
-            return Some(file_list_item(paths, self.read_string(connection)));
+        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        if let Some(paths) = self.read_file_paths(connection, transfer) {
+            return Some(file_list_item(
+                paths,
+                self.read_string(connection, transfer),
+            ));
         }
-        self.read_string(connection)
+        self.read_string(connection, transfer)
             .map(ClipboardItem::new_string)
-            .or_else(|| self.read_image(connection))
+            .or_else(|| self.read_image(connection, transfer))
     }
 
-    fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
+    fn read_image(
+        &self,
+        connection: &Connection,
+        transfer: &mut ClipboardTransfer,
+    ) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
             if !self.has_mime_type(mime_type) {
                 continue;
             }
 
-            if let Some(bytes) = self.read_bytes(connection, mime_type) {
+            if let Some(bytes) = self.read_bytes(connection, mime_type, transfer) {
                 let id = hash(&bytes);
                 return Some(ClipboardItem {
                     entries: vec![ClipboardEntry::Image(Image { format, bytes, id })],

@@ -54,6 +54,8 @@ use crate::linux::clipboard_formats::{
     file_list_item, parse_gnome_copied_files, parse_uri_list,
 };
 
+use crate::linux::clipboard_transfer::{CLIPBOARD_READ_TIMEOUT, ClipboardTransfer, TransferError};
+
 type Result<T, E = Error> = std::result::Result<T, E>;
 
 static CLIPBOARD: Mutex<Option<GlobalClipboard>> = parking_lot::const_mutex(None);
@@ -103,11 +105,6 @@ x11rb::atom_manager! {
 thread_local! {
     static ATOM_NAME_CACHE: RefCell<HashMap<Atom, &'static str>> = Default::default();
 }
-
-// Some clipboard items, like images, may take a very long time to produce a
-// `SelectionNotify`. Multiple seconds long.
-const LONG_TIMEOUT_DUR: Duration = Duration::from_millis(4000);
-const SHORT_TIMEOUT_DUR: Duration = Duration::from_millis(10);
 
 #[derive(Debug, PartialEq, Eq)]
 enum ManagerHandoverState {
@@ -287,7 +284,12 @@ impl Inner {
     /// `formats` must be a slice of atoms, where each atom represents a target format.
     /// The first format from `formats`, which the clipboard owner supports will be the
     /// format of the return value.
-    fn read(&self, formats: &[Atom], selection: ClipboardKind) -> Result<ClipboardData> {
+    fn read(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        transfer: &mut ClipboardTransfer,
+    ) -> Result<ClipboardData> {
         // if we are the current owner, we can get the current clipboard ourselves
         if self.is_owner(selection)? {
             let data = self.selection_of(selection).data.read();
@@ -303,7 +305,8 @@ impl Inner {
         let reader = XContext::new()?;
 
         let highest_precedence_format =
-            match self.read_single(&reader, selection, self.atoms.TARGETS) {
+            match self.read_single(&reader, selection, self.atoms.TARGETS, transfer) {
+                Err(error @ Error::Transfer(_)) => return Err(error),
                 Err(err) => {
                     log::trace!("Clipboard TARGETS query failed with {err:?}");
                     None
@@ -325,7 +328,7 @@ impl Inner {
             };
 
         if let Some(&format) = highest_precedence_format {
-            let data = self.read_single(&reader, selection, format)?;
+            let data = self.read_single(&reader, selection, format, transfer)?;
             if !formats.contains(&data.format) {
                 // This shouldn't happen since the format is from the TARGETS list.
                 log::trace!(
@@ -340,7 +343,7 @@ impl Inner {
 
         log::trace!("Falling back on attempting to convert clipboard to each format.");
         for format in formats {
-            match self.read_single(&reader, selection, *format) {
+            match self.read_single(&reader, selection, *format, transfer) {
                 Ok(data) => {
                     if formats.contains(&data.format) {
                         return Ok(data);
@@ -378,6 +381,7 @@ impl Inner {
         reader: &XContext,
         selection: ClipboardKind,
         target_format: Atom,
+        transfer: &mut ClipboardTransfer,
     ) -> Result<ClipboardData> {
         // Delete the property so that we can detect (using property notify)
         // when the selection owner receives our request.
@@ -404,9 +408,7 @@ impl Inner {
         let mut incr_data: Vec<u8> = Vec::new();
         let mut using_incr = false;
 
-        let mut timeout_end = Instant::now() + LONG_TIMEOUT_DUR;
-
-        while Instant::now() < timeout_end {
+        while transfer.remaining_time().is_ok() {
             let event = reader.conn.poll_for_event().map_err(into_unknown)?;
             let event = match event {
                 Some(e) => e,
@@ -423,17 +425,12 @@ impl Inner {
                         reader,
                         target_format,
                         &mut using_incr,
-                        &mut incr_data,
+                        transfer,
                         event,
                     )?;
                     match result {
                         ReadSelNotifyResult::GotData(data) => return Ok(data),
-                        ReadSelNotifyResult::IncrStarted => {
-                            // This means we received an indication that an the
-                            // data is going to be sent INCRementally. Let's
-                            // reset our timeout.
-                            timeout_end += SHORT_TIMEOUT_DUR;
-                        }
+                        ReadSelNotifyResult::IncrStarted => (),
                         ReadSelNotifyResult::EventNotRecognized => (),
                     }
                 }
@@ -446,7 +443,7 @@ impl Inner {
                         target_format,
                         using_incr,
                         &mut incr_data,
-                        &mut timeout_end,
+                        transfer,
                         event,
                     )?;
                     if result {
@@ -462,8 +459,7 @@ impl Inner {
                 ),
             }
         }
-        log::info!("Time-out hit while reading the clipboard.");
-        Err(Error::ContentNotAvailable)
+        Err(Error::Transfer(TransferError::TimedOut))
     }
 
     fn atom_of(&self, selection: ClipboardKind) -> Atom {
@@ -539,7 +535,7 @@ impl Inner {
         reader: &XContext,
         target_format: u32,
         using_incr: &mut bool,
-        incr_data: &mut Vec<u8>,
+        transfer: &mut ClipboardTransfer,
         event: SelectionNotifyEvent,
     ) -> Result<ReadSelNotifyResult> {
         // The property being set to NONE means that the `convert_selection`
@@ -567,7 +563,7 @@ impl Inner {
         // is provided.
         let property_type = AtomEnum::ANY;
         // request the selection
-        let mut reply = reader
+        let reply = reader
             .conn
             .get_property(
                 true,
@@ -575,42 +571,28 @@ impl Inner {
                 event.property,
                 property_type,
                 0,
-                u32::MAX / 4,
+                transfer.remaining_bytes().div_ceil(4) as u32,
             )
             .map_err(into_unknown)?
             .reply()
             .map_err(into_unknown)?;
 
+        if reply.bytes_after != 0 || reply.value.len() > transfer.remaining_bytes() {
+            return Err(Error::Transfer(TransferError::TooLarge));
+        }
         // we found something
         if reply.type_ == self.atoms.INCR {
-            // Note that we call the get_property again because we are
-            // indicating that we are ready to receive the data by deleting the
-            // property, however deleting only works if the type matches the
-            // property type. But the type didn't match in the previous call.
-            reply = reader
-                .conn
-                .get_property(
-                    true,
-                    event.requestor,
-                    event.property,
-                    self.atoms.INCR,
-                    0,
-                    u32::MAX / 4,
-                )
-                .map_err(into_unknown)?
-                .reply()
-                .map_err(into_unknown)?;
-            log::trace!("Receiving INCR segments");
             *using_incr = true;
-            if reply.value_len == 4 {
-                let min_data_len = reply
-                    .value32()
-                    .and_then(|mut vals| vals.next())
-                    .unwrap_or(0);
-                incr_data.reserve(min_data_len as usize);
+            if let Some(min_data_len) = reply.value32().and_then(|mut values| values.next())
+                && min_data_len as usize > transfer.remaining_bytes()
+            {
+                return Err(Error::Transfer(TransferError::TooLarge));
             }
             Ok(ReadSelNotifyResult::IncrStarted)
         } else {
+            transfer
+                .receive(reply.value.len())
+                .map_err(Error::Transfer)?;
             Ok(ReadSelNotifyResult::GotData(ClipboardData {
                 bytes: reply.value,
                 format: reply.type_,
@@ -625,7 +607,7 @@ impl Inner {
         target_format: u32,
         using_incr: bool,
         incr_data: &mut Vec<u8>,
-        timeout_end: &mut Instant,
+        transfer: &mut ClipboardTransfer,
         event: PropertyNotifyEvent,
     ) -> Result<bool> {
         if event.atom != self.atoms.ARBOARD_CLIPBOARD || event.state != Property::NEW_VALUE {
@@ -648,21 +630,23 @@ impl Inner {
                     target_format
                 },
                 0,
-                u32::MAX / 4,
+                transfer.remaining_bytes().div_ceil(4) as u32,
             )
             .map_err(into_unknown)?
             .reply()
             .map_err(into_unknown)?;
 
-        // log::trace!("Received segment. value_len {}", reply.value_len,);
+        if reply.bytes_after != 0 {
+            return Err(Error::Transfer(TransferError::TooLarge));
+        }
+        transfer
+            .receive(reply.value.len())
+            .map_err(Error::Transfer)?;
         if reply.value_len == 0 {
             // This indicates that all the data has been sent.
             return Ok(true);
         }
         incr_data.extend(reply.value);
-
-        // Let's reset our timeout, since we received a valid chunk.
-        *timeout_end = Instant::now() + SHORT_TIMEOUT_DUR;
 
         // Not yet complete
         Ok(false)
@@ -1064,10 +1048,11 @@ impl Clipboard {
             file_list_format_atoms.len() + image_entries.len() + self.text_format_atoms().len(),
         );
         format_atoms.extend_from_slice(&file_list_format_atoms);
-        format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
         format_atoms.extend_from_slice(&self.text_format_atoms());
+        format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
 
-        let mut result = self.inner.read(&format_atoms, selection)?;
+        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        let mut result = self.inner.read(&format_atoms, selection, transfer)?;
 
         log::trace!(
             "read clipboard as format {:?}",
@@ -1078,15 +1063,17 @@ impl Clipboard {
             if let Some(paths) = self.file_paths(&result) {
                 let text = self
                     .inner
-                    .read(&self.text_format_atoms(), selection)
+                    .read(&self.text_format_atoms(), selection, transfer)
                     .and_then(|data| self.decode_text(data))
                     .ok();
                 return Ok(file_list_item(paths, text));
             }
             // The file list names something other than local files, so read the rest.
-            result = self
-                .inner
-                .read(&format_atoms[file_list_format_atoms.len()..], selection)?;
+            result = self.inner.read(
+                &format_atoms[file_list_format_atoms.len()..],
+                selection,
+                transfer,
+            )?;
         }
 
         for (format_atom, image_format) in image_entries {
@@ -1248,6 +1235,7 @@ pub(crate) enum WaitConfig {
 
 #[non_exhaustive]
 pub enum Error {
+    Transfer(TransferError),
     /// The clipboard contents were not available in the requested format.
     /// This could either be due to the clipboard being empty or the clipboard contents having
     /// an incompatible format to the requested one (eg when calling `get_image` on text)
@@ -1272,12 +1260,15 @@ pub enum Error {
     ///
     /// The `description` field is only meant to help the developer and should not be relied on as a
     /// means to identify an error case during runtime.
-    Unknown { description: String },
+    Unknown {
+        description: String,
+    },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::Transfer(error) => std::fmt::Display::fmt(error, f),
 			Error::ContentNotAvailable => f.write_str("The clipboard contents were not available in the requested format or the clipboard is empty."),
 			Error::ClipboardOccupied => f.write_str("The native clipboard is not accessible due to being held by an other party."),
 			Error::ConversionFailure => f.write_str("The image or the text that was about the be transferred to/from the clipboard could not be converted to the appropriate format."),
@@ -1301,6 +1292,7 @@ impl std::fmt::Debug for Error {
 			}
 		}
         let name = kind_to_str!(
+            Transfer(_),
             ContentNotAvailable,
             ClipboardOccupied,
             ConversionFailure,
@@ -1315,5 +1307,313 @@ impl Error {
         Error::Unknown {
             description: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES;
+    use x11rb::protocol::xproto::ChangeWindowAttributesAux;
+
+    static DISPLAY_TEST: Mutex<()> = parking_lot::const_mutex(());
+
+    enum Offer {
+        Mixed { files: bool },
+        Direct(usize),
+        Incremental(usize),
+        Trickle,
+        LargeHint,
+    }
+
+    struct Owner {
+        stopped: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Owner {
+        fn new(selection: ClipboardKind, offer: Offer) -> Self {
+            let context = XContext::new().expect("private X11 display required");
+            let atoms = Atoms::new(&context.conn).unwrap().reply().unwrap();
+            let selection = match selection {
+                ClipboardKind::Clipboard => atoms.CLIPBOARD,
+                ClipboardKind::Primary => atoms.PRIMARY,
+                ClipboardKind::Secondary => atoms.SECONDARY,
+            };
+            context
+                .conn
+                .set_selection_owner(context.win_id, selection, Time::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            context.conn.flush().unwrap();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let worker = std::thread::spawn({
+                let stopped = stopped.clone();
+                move || {
+                    let mut incremental: Option<(u32, Atom, Atom, usize)> = None;
+                    while !stopped.load(Ordering::Relaxed) {
+                        let Some(event) = context.conn.poll_for_event().unwrap() else {
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
+                        };
+                        match event {
+                            Event::SelectionRequest(event) => {
+                                let mut property = event.property;
+                                if event.target == atoms.TARGETS {
+                                    let targets = match &offer {
+                                        Offer::Mixed { files: true } => {
+                                            vec![atoms.PNG__MIME, atoms.UTF8_STRING, atoms.URI_LIST]
+                                        }
+                                        Offer::Mixed { files: false } => {
+                                            vec![atoms.PNG__MIME, atoms.UTF8_STRING]
+                                        }
+                                        _ => vec![atoms.UTF8_STRING],
+                                    };
+                                    context
+                                        .conn
+                                        .change_property32(
+                                            PropMode::REPLACE,
+                                            event.requestor,
+                                            property,
+                                            atoms.ATOM,
+                                            &targets,
+                                        )
+                                        .unwrap()
+                                        .check()
+                                        .unwrap();
+                                } else if matches!(offer, Offer::Mixed { .. }) {
+                                    let bytes: &[u8] = if event.target == atoms.UTF8_STRING {
+                                        b"clipboard text"
+                                    } else if event.target == atoms.URI_LIST {
+                                        b"file:///tmp/clipboard-file\r\n"
+                                    } else {
+                                        b"image alternate"
+                                    };
+                                    context
+                                        .conn
+                                        .change_property8(
+                                            PropMode::REPLACE,
+                                            event.requestor,
+                                            property,
+                                            event.target,
+                                            bytes,
+                                        )
+                                        .unwrap()
+                                        .check()
+                                        .unwrap();
+                                } else if let Offer::Direct(length) = offer {
+                                    context
+                                        .conn
+                                        .change_property8(
+                                            PropMode::REPLACE,
+                                            event.requestor,
+                                            property,
+                                            event.target,
+                                            &[],
+                                        )
+                                        .unwrap()
+                                        .check()
+                                        .unwrap();
+                                    let chunk = [b'x'; 64 * 1024];
+                                    let mut remaining = length;
+                                    while remaining > 0 {
+                                        let length = remaining.min(chunk.len());
+                                        context
+                                            .conn
+                                            .change_property8(
+                                                PropMode::APPEND,
+                                                event.requestor,
+                                                property,
+                                                event.target,
+                                                &chunk[..length],
+                                            )
+                                            .unwrap()
+                                            .check()
+                                            .unwrap();
+                                        remaining -= length;
+                                    }
+                                } else if matches!(
+                                    offer,
+                                    Offer::Incremental(_) | Offer::Trickle | Offer::LargeHint
+                                ) {
+                                    context
+                                        .conn
+                                        .change_window_attributes(
+                                            event.requestor,
+                                            &ChangeWindowAttributesAux::new()
+                                                .event_mask(EventMask::PROPERTY_CHANGE),
+                                        )
+                                        .unwrap()
+                                        .check()
+                                        .unwrap();
+                                    let hint = if matches!(offer, Offer::LargeHint) {
+                                        u32::MAX
+                                    } else {
+                                        0
+                                    };
+                                    context
+                                        .conn
+                                        .change_property32(
+                                            PropMode::REPLACE,
+                                            event.requestor,
+                                            property,
+                                            atoms.INCR,
+                                            &[hint],
+                                        )
+                                        .unwrap()
+                                        .check()
+                                        .unwrap();
+                                    let remaining = match offer {
+                                        Offer::Incremental(length) => length,
+                                        _ => usize::MAX,
+                                    };
+                                    incremental =
+                                        Some((event.requestor, property, event.target, remaining));
+                                } else {
+                                    property = NONE;
+                                }
+                                context
+                                    .conn
+                                    .send_event(
+                                        false,
+                                        event.requestor,
+                                        EventMask::NO_EVENT,
+                                        SelectionNotifyEvent {
+                                            response_type: SELECTION_NOTIFY_EVENT,
+                                            sequence: 0,
+                                            time: event.time,
+                                            requestor: event.requestor,
+                                            selection: event.selection,
+                                            target: event.target,
+                                            property,
+                                        },
+                                    )
+                                    .unwrap()
+                                    .check()
+                                    .unwrap();
+                                context.conn.flush().unwrap();
+                            }
+                            Event::PropertyNotify(event) if event.state == Property::DELETE => {
+                                if let Some((window, property, target, remaining)) =
+                                    incremental.as_mut()
+                                    && event.window == *window
+                                    && event.atom == *property
+                                {
+                                    if matches!(offer, Offer::LargeHint) {
+                                        continue;
+                                    }
+                                    if matches!(offer, Offer::Trickle) {
+                                        std::thread::sleep(Duration::from_millis(3));
+                                    }
+                                    let length = (*remaining).min(8192);
+                                    let result = context
+                                        .conn
+                                        .change_property8(
+                                            PropMode::REPLACE,
+                                            *window,
+                                            *property,
+                                            *target,
+                                            &vec![b'x'; length],
+                                        )
+                                        .unwrap()
+                                        .check();
+                                    // The reader destroys its window when rejecting an owner.
+                                    if result.is_err() {
+                                        incremental = None;
+                                        continue;
+                                    }
+                                    *remaining -= length;
+                                    if length == 0 {
+                                        incremental = None;
+                                    }
+                                    context.conn.flush().unwrap();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            });
+            Self {
+                stopped,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::Relaxed);
+            self.worker.take().unwrap().join().unwrap();
+        }
+    }
+
+    fn clipboard() -> Clipboard {
+        Clipboard {
+            inner: Arc::new(Inner::new().unwrap()),
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn external_mixed_offers_prefer_text_and_preserve_file_precedence() {
+        let _display = DISPLAY_TEST.lock();
+        let clipboard = clipboard();
+        for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
+            let owner = Owner::new(selection, Offer::Mixed { files: false });
+            assert_eq!(
+                clipboard.get_any(selection).unwrap().text().as_deref(),
+                Some("clipboard text")
+            );
+            drop(owner);
+            let _owner = Owner::new(selection, Offer::Mixed { files: true });
+            let item = clipboard.get_any(selection).unwrap();
+            assert!(matches!(
+                item.entries().first(),
+                Some(gpui::ClipboardEntry::ExternalPaths(_))
+            ));
+            assert_eq!(item.text().as_deref(), Some("clipboard text"));
+        }
+    }
+
+    fn read_external(offer: Offer, timeout: Duration) -> Result<ClipboardData> {
+        let inner = Inner::new().unwrap();
+        let _owner = Owner::new(ClipboardKind::Clipboard, offer);
+        inner.read(
+            &[inner.atoms.UTF8_STRING],
+            ClipboardKind::Clipboard,
+            &mut ClipboardTransfer::new(timeout),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn external_direct_and_incremental_transfers_are_bounded() {
+        let _display = DISPLAY_TEST.lock();
+        let data = read_external(Offer::Incremental(128 * 1024), CLIPBOARD_READ_TIMEOUT).unwrap();
+        assert_eq!(data.bytes, vec![b'x'; 128 * 1024]);
+        for offer in [
+            Offer::Direct(MAX_CLIPBOARD_BYTES + 1),
+            Offer::Incremental(MAX_CLIPBOARD_BYTES + 1),
+            Offer::LargeHint,
+        ] {
+            assert!(matches!(
+                read_external(offer, CLIPBOARD_READ_TIMEOUT),
+                Err(Error::Transfer(TransferError::TooLarge))
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn external_trickling_owner_cannot_renew_deadline() {
+        let _display = DISPLAY_TEST.lock();
+        let started = Instant::now();
+        assert!(matches!(
+            read_external(Offer::Trickle, Duration::from_millis(100)),
+            Err(Error::Transfer(TransferError::TimedOut))
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

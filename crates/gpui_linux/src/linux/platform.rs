@@ -952,12 +952,23 @@ pub(super) fn get_xkb_compose_state(cx: &xkb::Context) -> Option<xkb::compose::S
 }
 
 #[cfg(feature = "wayland")]
-pub(super) const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(4);
+pub(super) const PIPE_READ_TIMEOUT: Duration = super::clipboard_transfer::CLIPBOARD_READ_TIMEOUT;
 
 #[cfg(feature = "wayland")]
 pub(super) fn read_fd_with_timeout(
-    mut fd: filedescriptor::FileDescriptor,
+    fd: filedescriptor::FileDescriptor,
     timeout: Duration,
+) -> Result<Vec<u8>> {
+    read_fd_with_budget(
+        fd,
+        &mut super::clipboard_transfer::ClipboardTransfer::new(timeout),
+    )
+}
+
+#[cfg(feature = "wayland")]
+pub(super) fn read_fd_with_budget(
+    mut fd: filedescriptor::FileDescriptor,
+    transfer: &mut super::clipboard_transfer::ClipboardTransfer,
 ) -> Result<Vec<u8>> {
     fd.set_non_blocking(true)?;
     let mut buffer = Vec::new();
@@ -968,7 +979,7 @@ pub(super) fn read_fd_with_timeout(
             events: filedescriptor::POLLIN,
             revents: 0,
         }];
-        let ready = match filedescriptor::poll(&mut poll_fds, Some(timeout)) {
+        let ready = match filedescriptor::poll(&mut poll_fds, Some(transfer.remaining_time()?)) {
             Ok(ready) => ready,
             Err(filedescriptor::Error::Poll(err))
                 if err.kind() == std::io::ErrorKind::Interrupted =>
@@ -978,11 +989,14 @@ pub(super) fn read_fd_with_timeout(
             Err(err) => return Err(err.into()),
         };
         if ready == 0 {
-            anyhow::bail!("timed out waiting for data on pipe after {timeout:?}");
+            continue;
         }
         match fd.read(&mut chunk) {
             Ok(0) => return Ok(buffer),
-            Ok(len) => buffer.extend_from_slice(&chunk[..len]),
+            Ok(len) => {
+                transfer.receive(len)?;
+                buffer.extend_from_slice(&chunk[..len]);
+            }
             Err(err)
                 if err.kind() == std::io::ErrorKind::WouldBlock
                     || err.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1587,7 +1601,7 @@ mod tests {
         }
 
         #[test]
-        fn slow_writer_resets_deadline_between_chunks() {
+        fn slow_writer_cannot_extend_the_transfer_deadline() {
             let pipe = filedescriptor::Pipe::new().unwrap();
             let chunks = 12;
             let gap = Duration::from_millis(40);
@@ -1598,15 +1612,38 @@ mod tests {
                 move || {
                     for _ in 0..chunks {
                         std::thread::sleep(gap);
-                        write.write_all(&[b'x'; 1000]).unwrap();
+                        if write.write_all(&[b'x'; 1000]).is_err() {
+                            break;
+                        }
                     }
                 }
             });
-            // The total transfer (~480ms) exceeds the timeout; this only
-            // passes because the timeout is re-armed per chunk.
-            let bytes = read_fd_with_timeout(pipe.read, timeout).unwrap();
+            let result = read_fd_with_timeout(pipe.read, timeout);
             writer.join().unwrap();
-            assert_eq!(bytes, vec![b'x'; 1000 * chunks]);
+            assert!(
+                result.is_err(),
+                "a trickling owner must not renew the deadline"
+            );
+        }
+
+        #[test]
+        fn rejects_oversized_transfer_before_the_owner_closes() {
+            let pipe = filedescriptor::Pipe::new().unwrap();
+            let writer = std::thread::spawn(move || {
+                let mut write = pipe.write;
+                for _ in 0..2049 {
+                    if write.write_all(&[b'x'; 8192]).is_err() {
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            });
+            let result = read_fd_with_timeout(pipe.read, PIPE_READ_TIMEOUT);
+            writer.join().unwrap();
+            assert!(
+                result.is_err(),
+                "more than 16 MiB must be rejected while receiving"
+            );
         }
 
         #[test]

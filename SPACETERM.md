@@ -61,6 +61,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): preserve client frame geometry and input regions`
 - `feat(gpui): expose native interactive resize state`
 
+- `fix(gpui_linux): bound clipboard reads and prefer text alternates`
+
 ## Monthly rebase
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.
