@@ -474,6 +474,16 @@ impl TestAppContext {
             .simulate_visibility_change(visibility);
     }
 
+    /// Simulates whether a client-decorated window can carry a transparent shadow gutter.
+    pub fn simulate_transparent_client_frame_support(
+        &self,
+        window_handle: AnyWindowHandle,
+        supported: bool,
+    ) {
+        self.test_window(window_handle)
+            .simulate_transparent_client_frame_support(supported);
+    }
+
     /// Simulates a native interactive-resize transition.
     pub fn simulate_window_live_resize_change(
         &self,

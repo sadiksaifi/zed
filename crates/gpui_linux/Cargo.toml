@@ -127,6 +127,7 @@ x11rb = { version = "0.13.1", features = [
     "cursor",
     "resource_manager",
     "sync",
+    "shape",
     "dri3",
 ], optional = true }
 # WARNING: If you change this, you must also publish a new version of zed-xim to crates.io

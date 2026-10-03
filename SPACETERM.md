@@ -58,6 +58,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `feat(gpui): move and resize windows with set_bounds`
 - `feat(gpui): drag files with their own icons`
 - `feat(gpui): drag files as a caller-drawn image`
+- `fix(gpui_linux): preserve client frame geometry and input regions`
 - `feat(gpui): expose native interactive resize state`
 
 ## Monthly rebase

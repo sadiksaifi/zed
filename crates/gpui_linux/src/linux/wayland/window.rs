@@ -564,9 +564,16 @@ impl WaylandWindowState {
         globals: Globals,
         gpu_context: gpui_wgpu::GpuContext,
         compositor_gpu: Option<CompositorGpuHint>,
-        options: WindowParams,
+        mut options: WindowParams,
         parent: Option<WaylandWindowStatePtr>,
     ) -> anyhow::Result<Self> {
+        let (bounds, client_inset) = crate::linux::window_frame::client_frame_bounds(
+            options.bounds,
+            options.window_decorations,
+            options.client_inset,
+            true,
+        );
+        options.bounds = bounds;
         let renderer = {
             let raw_window = RawWindow {
                 window: surface.id().as_ptr().cast::<c_void>(),
@@ -634,7 +641,7 @@ impl WaylandWindowState {
             pending_frame_callback: None,
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
-            client_inset: None,
+            client_inset: Some(client_inset),
             is_resizable: options.is_resizable,
             is_minimizable: options.is_minimizable,
             min_size: options.window_min_size,
@@ -705,6 +712,21 @@ impl WaylandWindowState {
         }
         self.display = current_output;
         scale
+    }
+
+    fn set_decoration_mode(&mut self, decorations: WindowDecorations) -> Option<Size<Pixels>> {
+        if self.decorations == decorations {
+            return None;
+        }
+        let previous_inset = self.inset();
+        self.decorations = decorations;
+        let inset = self.inset();
+        let content = inset_by_tiling(self.bounds, previous_inset, self.tiling);
+        let surface_size = compute_outer_size(inset, Some(content.size), self.tiling).unwrap();
+        // The restore bounds always describe an untiled surface.
+        let restore_content = self.window_bounds.inset(previous_inset);
+        self.window_bounds = restore_content.dilate(inset);
+        Some(surface_size)
     }
 
     pub fn inset(&self) -> Pixels {
@@ -1197,32 +1219,26 @@ impl WaylandWindowStatePtr {
 
     pub fn handle_toplevel_decoration_event(&self, event: zxdg_toplevel_decoration_v1::Event) {
         if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
-            match mode {
+            let decorations = match mode {
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => {
-                    self.state.borrow_mut().decorations = WindowDecorations::Server;
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
-                    if let Some(mut fun) = callback {
-                        fun();
-                        self.callbacks.borrow_mut().appearance_changed = Some(fun);
-                    }
+                    WindowDecorations::Server
                 }
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide) => {
-                    self.state.borrow_mut().decorations = WindowDecorations::Client;
-                    // Update background to be transparent
-                    let callback = self.callbacks.borrow_mut().appearance_changed.take();
-                    if let Some(mut fun) = callback {
-                        fun();
-                        self.callbacks.borrow_mut().appearance_changed = Some(fun);
-                    }
+                    WindowDecorations::Client
                 }
-                WEnum::Value(_) => {
+                WEnum::Value(_) | WEnum::Unknown(_) => {
                     log::warn!("Unknown decoration mode");
                     return;
                 }
-                WEnum::Unknown(v) => {
-                    log::warn!("Unknown decoration mode: {}", v);
-                    return;
-                }
+            };
+            let size = self.state.borrow_mut().set_decoration_mode(decorations);
+            if let Some(size) = size {
+                self.resize(size);
+            }
+            let callback = self.callbacks.borrow_mut().appearance_changed.take();
+            if let Some(mut callback) = callback {
+                callback();
+                self.callbacks.borrow_mut().appearance_changed = Some(callback);
             }
             update_window(self.state.borrow_mut());
             self.request_redraw();
@@ -2035,6 +2051,9 @@ impl PlatformWindow for WaylandWindow {
     fn on_live_resize_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.callbacks.borrow_mut().live_resize_change = Some(callback);
     }
+    fn supports_transparent_client_frame(&self) -> bool {
+        self.borrow().decorations == WindowDecorations::Client
+    }
 
     fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
         self.0.callbacks.borrow_mut().visibility_change = Some(callback);
@@ -2531,6 +2550,21 @@ mod size_limits_tests {
         assert_eq!(
             toplevel_size_limits(true, None, 8192, size(px(800.), px(600.))),
             (size(0, 0), size(8192, 8192))
+        );
+    }
+
+    #[test]
+    fn client_frame_workspace_minimum_excludes_the_shadow_gutter() {
+        let surface = Bounds::new(point(px(0.), px(0.)), size(px(948.), px(628.)));
+        let content = inset_by_tiling(surface, px(24.), Tiling::default());
+        assert_eq!(content.size, size(px(900.), px(580.)));
+        assert_eq!(
+            toplevel_size_limits(true, Some(size(px(480.), px(260.))), 8192, content.size).0,
+            size(480, 260)
+        );
+        assert_eq!(
+            toplevel_size_limits(false, None, 8192, content.size),
+            (size(900, 580), size(900, 580))
         );
     }
 

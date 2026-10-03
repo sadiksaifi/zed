@@ -1536,6 +1536,7 @@ impl Window {
             app_id,
             window_min_size,
             window_decorations,
+            client_inset,
             #[cfg_attr(
                 not(any(target_os = "linux", target_os = "freebsd")),
                 allow(unused_variables)
@@ -1564,6 +1565,8 @@ impl Window {
                 show,
                 display_id,
                 window_min_size,
+                window_decorations: window_decorations.unwrap_or(WindowDecorations::Server),
+                client_inset,
                 app_id: app_id.clone(),
                 icon,
                 #[cfg(target_os = "macos")]
@@ -2924,6 +2927,11 @@ impl Window {
     pub fn set_client_inset(&mut self, inset: Pixels) {
         self.client_inset = Some(inset);
         self.platform_window.set_client_inset(inset);
+    }
+
+    /// Whether the actual native decoration mode supports a transparent client frame.
+    pub fn supports_transparent_client_frame(&self) -> bool {
+        self.platform_window.supports_transparent_client_frame()
     }
 
     /// Returns the client_inset value by [`Self::set_client_inset`].

@@ -210,7 +210,7 @@ pub struct X11ClientState {
     pub(crate) xcb_connection: Rc<XCBConnection>,
     xkb_device_id: i32,
     compositor_present: bool,
-    client_side_decorations_supported: bool,
+    transparent_client_frame_supported: bool,
     pub(crate) x_root_index: usize,
     pub(crate) resource_database: Database,
     pub(crate) atoms: XcbAtoms,
@@ -419,7 +419,7 @@ impl X11Client {
         let compositor_present = check_compositor_present(&xcb_connection, root);
         let gtk_frame_extents_supported =
             check_gtk_frame_extents_supported(&xcb_connection, &atoms, root);
-        let client_side_decorations_supported = compositor_present && gtk_frame_extents_supported;
+        let transparent_client_frame_supported = compositor_present;
         log::info!(
             "x11: compositor present: {}, gtk_frame_extents_supported: {}",
             compositor_present,
@@ -573,7 +573,7 @@ impl X11Client {
             xcb_connection,
             xkb_device_id,
             compositor_present,
-            client_side_decorations_supported,
+            transparent_client_frame_supported,
             x_root_index,
             resource_database,
             atoms,
@@ -1668,7 +1668,7 @@ impl LinuxClient for X11Client {
             .context("X11: Failed to generate window ID")?;
 
         let xcb_connection = state.xcb_connection.clone();
-        let client_side_decorations_supported = state.client_side_decorations_supported;
+        let transparent_client_frame_supported = state.transparent_client_frame_supported;
         let x_root_index = state.x_root_index;
         let atoms = state.atoms;
         let scale_factor = state.scale_factor;
@@ -1687,7 +1687,7 @@ impl LinuxClient for X11Client {
             compositor_gpu,
             params,
             &xcb_connection,
-            client_side_decorations_supported,
+            transparent_client_frame_supported,
             x_root_index,
             x_window,
             &atoms,

@@ -11,6 +11,8 @@ mod system_notifications;
 mod text_system;
 #[cfg(any(feature = "wayland", feature = "x11"))]
 mod titlebar_action;
+#[cfg(any(feature = "wayland", feature = "x11"))]
+mod window_frame;
 #[cfg(feature = "wayland")]
 mod wayland;
 #[cfg(feature = "x11")]

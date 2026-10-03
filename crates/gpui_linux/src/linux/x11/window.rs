@@ -292,10 +292,11 @@ pub struct X11WindowState {
     hovered: bool,
     force_render_after_recovery: bool,
     fullscreen: bool,
-    client_side_decorations_supported: bool,
+    transparent_client_frame_supported: bool,
     decorations: WindowDecorations,
     edge_constraints: Option<EdgeConstraints>,
     pub handle: AnyWindowHandle,
+    input_region: super::input_region::InputRegion,
     last_insets: [u32; 4],
     size_limits: SizeLimits,
     is_minimizable: bool,
@@ -308,6 +309,7 @@ struct SizeLimits {
     min_size: Option<Size<Pixels>>,
     /// The GPU's maximum texture dimension, which bounds what the renderer can draw.
     max_texture_size: u32,
+    frame_extents: [u32; 4],
 }
 
 impl SizeLimits {
@@ -318,7 +320,11 @@ impl SizeLimits {
         if self.is_resizable {
             hints.min_size = self.min_size.map(|min_size| {
                 let min_size = min_size.to_device_pixels(scale_factor);
-                (min_size.width.0, min_size.height.0)
+                let [left, right, top, bottom] = self.frame_extents;
+                (
+                    min_size.width.0 + (left + right) as i32,
+                    min_size.height.0 + (top + bottom) as i32,
+                )
             });
             let max_texture_size = self.max_texture_size as i32;
             hints.max_size = Some((max_texture_size, max_texture_size));
@@ -349,8 +355,9 @@ impl X11WindowState {
     /// Client decorations draw a transparent shadow gutter and rounded corners around the
     /// window, so they need a transparent surface even with an opaque background.
     fn is_transparent(&self) -> bool {
-        self.decorations == WindowDecorations::Client
-            || self.background_appearance != WindowBackgroundAppearance::Opaque
+        self.transparent_client_frame_supported
+            && (self.decorations == WindowDecorations::Client
+                || self.background_appearance != WindowBackgroundAppearance::Opaque)
     }
 }
 
@@ -582,9 +589,9 @@ impl X11WindowState {
         executor: ForegroundExecutor,
         gpu_context: gpui_wgpu::GpuContext,
         compositor_gpu: Option<CompositorGpuHint>,
-        params: WindowParams,
+        mut params: WindowParams,
         xcb: &Rc<XCBConnection>,
-        client_side_decorations_supported: bool,
+        transparent_client_frame_supported: bool,
         x_main_screen_index: usize,
         x_window: xproto::Window,
         atoms: &XcbAtoms,
@@ -643,6 +650,14 @@ impl X11WindowState {
                     | xproto::EventMask::VISIBILITY_CHANGE,
             );
 
+        let (surface_bounds, client_inset) = crate::linux::window_frame::client_frame_bounds(
+            params.bounds,
+            params.window_decorations,
+            params.client_inset,
+            transparent_client_frame_supported,
+        );
+        params.bounds = surface_bounds;
+        let initial_inset = (f32::from(client_inset) * scale_factor).round() as u32;
         let mut bounds = params.bounds.to_device_pixels(scale_factor);
         if bounds.size.width.0 == 0 || bounds.size.height.0 == 0 {
             log::warn!(
@@ -911,6 +926,7 @@ impl X11WindowState {
                 is_resizable: params.is_resizable,
                 min_size: params.window_min_size,
                 max_texture_size: renderer.max_texture_size(),
+                frame_extents: [initial_inset; 4],
             };
             size_limits.set_normal_hints(xcb, x_window, bounds.size, scale_factor)?;
 
@@ -966,8 +982,9 @@ impl X11WindowState {
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 destroyed: false,
-                client_side_decorations_supported,
+                transparent_client_frame_supported,
                 decorations: WindowDecorations::Server,
+                input_region: Default::default(),
                 last_insets: [0, 0, 0, 0],
                 edge_constraints: None,
                 accesskit_adapter: None,
@@ -1072,7 +1089,7 @@ impl X11Window {
         compositor_gpu: Option<CompositorGpuHint>,
         params: WindowParams,
         xcb: &Rc<XCBConnection>,
-        client_side_decorations_supported: bool,
+        transparent_client_frame_supported: bool,
         x_main_screen_index: usize,
         x_window: xproto::Window,
         atoms: &XcbAtoms,
@@ -1092,7 +1109,7 @@ impl X11Window {
                 compositor_gpu,
                 params,
                 xcb,
-                client_side_decorations_supported,
+                transparent_client_frame_supported,
                 x_main_screen_index,
                 x_window,
                 atoms,
@@ -2075,11 +2092,6 @@ impl PlatformWindow for X11Window {
     fn window_decorations(&self) -> gpui::Decorations {
         let state = self.0.state.borrow();
 
-        // Client window decorations require compositor support
-        if !state.client_side_decorations_supported {
-            return Decorations::Server;
-        }
-
         match state.decorations {
             WindowDecorations::Server => Decorations::Server,
             WindowDecorations::Client => {
@@ -2110,10 +2122,33 @@ impl PlatformWindow for X11Window {
         }
     }
 
+    fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
+        let mut state = self.0.state.borrow_mut();
+        let scale = state.scale_factor;
+        if state
+            .input_region
+            .set(&*self.0.xcb, self.0.x_window, region, scale)
+            .is_err()
+        {
+            log::warn!("X11 input region request failed");
+        }
+    }
+
+    fn supports_transparent_client_frame(&self) -> bool {
+        let state = self.0.state.borrow();
+        state.decorations == WindowDecorations::Client && state.transparent_client_frame_supported
+    }
+
     fn set_client_inset(&self, inset: Pixels) {
         let mut state = self.0.state.borrow_mut();
 
-        let dp = (f32::from(inset) * state.scale_factor) as u32;
+        let dp = if state.decorations == WindowDecorations::Client
+            && state.transparent_client_frame_supported
+        {
+            (f32::from(inset) * state.scale_factor).round() as u32
+        } else {
+            0
+        };
 
         let insets = if state.fullscreen {
             [0, 0, 0, 0]
@@ -2138,9 +2173,20 @@ impl PlatformWindow for X11Window {
             [left, right, top, bottom]
         };
 
+        if state.size_limits.frame_extents != insets {
+            state.size_limits.frame_extents = insets;
+            state
+                .size_limits
+                .set_normal_hints(
+                    &self.0.xcb,
+                    self.0.x_window,
+                    state.bounds.size.to_device_pixels(state.scale_factor),
+                    state.scale_factor,
+                )
+                .log_err();
+        }
         if state.last_insets != insets {
             state.last_insets = insets;
-
             check_reply(
                 || "X11 ChangeProperty for _GTK_FRAME_EXTENTS failed.",
                 self.0.xcb.change_property(
@@ -2157,17 +2203,8 @@ impl PlatformWindow for X11Window {
         }
     }
 
-    fn request_decorations(&self, mut decorations: gpui::WindowDecorations) {
+    fn request_decorations(&self, decorations: gpui::WindowDecorations) {
         let mut state = self.0.state.borrow_mut();
-
-        if matches!(decorations, gpui::WindowDecorations::Client)
-            && !state.client_side_decorations_supported
-        {
-            log::info!(
-                "x11: no compositor present, falling back to server-side window decorations"
-            );
-            decorations = gpui::WindowDecorations::Server;
-        }
 
         // https://github.com/rust-windowing/winit/blob/master/src/platform_impl/linux/x11/util/hint.rs#L53-L87
         let hints_data: [u32; 5] = match decorations {
@@ -2300,6 +2337,7 @@ mod tests {
             is_resizable: true,
             min_size: Some(size(px(300.), px(200.))),
             max_texture_size: 8192,
+            frame_extents: [0; 4],
         };
         let hints = limits.normal_hints(device_size(1600, 1200), 2.0);
         assert_eq!(hints.min_size, Some((600, 400)));
@@ -2316,11 +2354,42 @@ mod tests {
     }
 
     #[test]
+    fn client_frame_minimum_is_visible_content_in_device_pixels() {
+        let limits = SizeLimits {
+            is_resizable: true,
+            min_size: Some(size(px(480.), px(260.))),
+            max_texture_size: 8192,
+            frame_extents: [48; 4],
+        };
+        assert_eq!(
+            limits.normal_hints(device_size(1896, 1256), 2.).min_size,
+            Some((1056, 616))
+        );
+        let tiled = SizeLimits {
+            frame_extents: [0, 0, 48, 48],
+            ..limits
+        };
+        assert_eq!(
+            tiled.normal_hints(device_size(1896, 1256), 2.).min_size,
+            Some((960, 616))
+        );
+        let opaque = SizeLimits {
+            frame_extents: [0; 4],
+            ..tiled
+        };
+        assert_eq!(
+            opaque.normal_hints(device_size(1800, 1160), 2.).min_size,
+            Some((960, 520))
+        );
+    }
+
+    #[test]
     fn non_resizable_window_hints_fix_the_size() {
         let limits = SizeLimits {
             is_resizable: false,
             min_size: Some(size(px(300.), px(200.))),
             max_texture_size: 8192,
+            frame_extents: [0; 4],
         };
         let hints = limits.normal_hints(device_size(1400, 900), 2.0);
         assert_eq!(hints.min_size, Some((1400, 900)));

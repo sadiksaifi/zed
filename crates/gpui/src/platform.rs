@@ -1118,6 +1118,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn window_controls(&self) -> WindowControls {
         WindowControls::default()
     }
+    /// Whether this window uses client decorations that can carry a transparent shadow gutter.
+    fn supports_transparent_client_frame(&self) -> bool {
+        false
+    }
+
     fn set_client_inset(&self, _inset: Pixels) {}
     fn gpu_specs(&self) -> Option<GpuSpecs>;
 
@@ -2326,6 +2331,11 @@ pub struct WindowOptions {
     /// The platform may ignore requests it cannot satisfy.
     pub window_decorations: Option<WindowDecorations>,
 
+    /// Shadow gutter outside client-decorated content. Linux backends reserve this at creation
+    /// only when a transparent client frame is supported. Bounds and minimum size remain visible
+    /// content dimensions. Other platforms ignore it.
+    pub client_inset: Pixels,
+
     /// Icon image (X11 only)
     pub icon: Option<Arc<image::RgbaImage>>,
 
@@ -2393,6 +2403,8 @@ pub struct WindowParams {
     pub app_id: Option<String>,
 
     pub window_min_size: Option<Size<Pixels>>,
+    pub window_decorations: WindowDecorations,
+    pub client_inset: Pixels,
 
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
@@ -2456,6 +2468,7 @@ impl Default for WindowOptions {
             app_id: None,
             window_min_size: None,
             window_decorations: None,
+            client_inset: Pixels::ZERO,
             tabbing_identifier: None,
         }
     }

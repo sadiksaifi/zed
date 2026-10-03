@@ -87,6 +87,7 @@ pub(crate) struct TestWindowState {
     requests: Vec<TestWindowRequest>,
     decorations: Decorations,
     window_controls: WindowControls,
+    transparent_client_frame: bool,
     is_maximized: bool,
     is_fullscreen: bool,
     scale_factor: f32,
@@ -130,7 +131,11 @@ impl TestWindow {
             None => Arc::new(HeadlessAtlas::default()),
         };
         Self(Rc::new(Mutex::new(TestWindowState {
-            bounds: params.bounds,
+            bounds: if params.window_decorations == crate::WindowDecorations::Client {
+                params.bounds.dilate(params.client_inset)
+            } else {
+                params.bounds
+            },
             display,
             platform,
             handle,
@@ -170,6 +175,7 @@ impl TestWindow {
             requests: Vec::new(),
             decorations: Decorations::Server,
             window_controls: WindowControls::default(),
+            transparent_client_frame: true,
             is_maximized: false,
             is_fullscreen: false,
             // Preserve the test platform's historical 2x default.
@@ -216,6 +222,18 @@ impl TestWindow {
         if let Some(mut callback) = callback {
             callback(resizing);
             self.0.lock().live_resize_callback = Some(callback);
+        }
+    }
+
+    pub fn simulate_transparent_client_frame_support(&self, supported: bool) {
+        let callback = {
+            let mut state = self.0.lock();
+            state.transparent_client_frame = supported;
+            state.appearance_change_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.lock().appearance_change_callback = Some(callback);
         }
     }
 
@@ -681,6 +699,13 @@ impl PlatformWindow for TestWindow {
         self.0.lock().active_status_change_callback = Some(callback)
     }
 
+    fn supports_transparent_client_frame(&self) -> bool {
+        {
+            let state = self.0.lock();
+            state.transparent_client_frame
+                && matches!(state.decorations, Decorations::Client { .. })
+        }
+    }
     fn is_live_resizing(&self) -> bool {
         self.0.lock().live_resizing
     }
