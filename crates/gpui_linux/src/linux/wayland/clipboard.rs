@@ -1,10 +1,16 @@
 use std::{
+    cell::Cell,
     fs::File,
     io::{ErrorKind, Write},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    rc::Rc,
+    time::{Duration, Instant},
 };
 
-use calloop::{LoopHandle, PostAction};
+use calloop::{
+    LoopHandle, PostAction,
+    timer::{TimeoutAction, Timer},
+};
 use filedescriptor::Pipe;
 use strum::IntoEnumIterator;
 use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
@@ -28,6 +34,7 @@ use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, has
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 pub(crate) const FILE_LIST_MIME_TYPE: &str = URI_LIST_MIME_TYPE;
+const OUTGOING_TRANSFER_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -381,38 +388,206 @@ impl Clipboard {
     }
 
     pub fn send_bytes(&self, fd: OwnedFd, bytes: Vec<u8>) {
-        let mut written = 0;
-        self.loop_handle
-            .insert_source(
-                calloop::generic::Generic::new(
-                    File::from(fd),
-                    calloop::Interest::WRITE,
-                    calloop::Mode::Level,
-                ),
-                move |_, file, _| {
-                    let file = unsafe { file.get_mut() };
-                    loop {
-                        match file.write(&bytes[written..]) {
-                            Ok(n) if written + n == bytes.len() => {
-                                written += n;
-                                break Ok(PostAction::Remove);
-                            }
-                            Ok(n) => written += n,
-                            Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                                break Ok(PostAction::Continue);
-                            }
-                            Err(_) => break Ok(PostAction::Remove),
-                        }
-                    }
-                },
-            )
-            .unwrap();
+        if send_bytes(&self.loop_handle, fd, bytes, OUTGOING_TRANSFER_TIMEOUT).is_err() {
+            log::error!("outgoing clipboard transfer failed");
+        }
     }
+}
+
+fn send_bytes<Data: 'static>(
+    loop_handle: &LoopHandle<'static, Data>,
+    fd: OwnedFd,
+    bytes: Vec<u8>,
+    timeout: Duration,
+) -> calloop::Result<()> {
+    // Writable readiness cannot make a peer-provided blocking pipe safe to write.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    if flags == -1
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let deadline = Instant::now() + timeout;
+    let timer_token = Rc::new(Cell::new(None));
+    let mut written = 0;
+    let writer_token = loop_handle
+        .insert_source(
+            calloop::generic::Generic::new(
+                File::from(fd),
+                calloop::Interest::WRITE,
+                calloop::Mode::Level,
+            ),
+            {
+                let loop_handle = loop_handle.downgrade();
+                let timer_token = timer_token.clone();
+                move |_, file, _| {
+                    let action = if Instant::now() >= deadline {
+                        log::warn!("outgoing clipboard transfer timed out");
+                        PostAction::Remove
+                    } else {
+                        let file = unsafe { file.get_mut() };
+                        let end = written + (bytes.len() - written).min(64 * 1024);
+                        match file.write(&bytes[written..end]) {
+                            Ok(0) => PostAction::Remove,
+                            Ok(length) => {
+                                written += length;
+                                if written == bytes.len() {
+                                    PostAction::Remove
+                                } else {
+                                    PostAction::Continue
+                                }
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    ErrorKind::WouldBlock | ErrorKind::Interrupted
+                                ) =>
+                            {
+                                PostAction::Continue
+                            }
+                            Err(_) => {
+                                log::error!("outgoing clipboard transfer failed");
+                                PostAction::Remove
+                            }
+                        }
+                    };
+                    if action == PostAction::Remove
+                        && let Some(timer_token) = timer_token.take()
+                        && let Some(loop_handle) = loop_handle.upgrade()
+                    {
+                        loop_handle.remove(timer_token);
+                    }
+                    Ok(action)
+                }
+            },
+        )
+        .map_err(|error| error.error)?;
+
+    match loop_handle.insert_source(Timer::from_deadline(deadline), {
+        let loop_handle = loop_handle.downgrade();
+        move |_, _, _| {
+            if let Some(loop_handle) = loop_handle.upgrade() {
+                loop_handle.remove(writer_token);
+            }
+            log::warn!("outgoing clipboard transfer timed out");
+            TimeoutAction::Drop
+        }
+    }) {
+        Ok(token) => timer_token.set(Some(token)),
+        Err(error) => {
+            loop_handle.remove(writer_token);
+            return Err(error.error);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::Read, sync::mpsc};
+
+    fn blocking_pipe() -> anyhow::Result<(File, OwnedFd)> {
+        let pipe = Pipe::new()?;
+        Ok((pipe.read.as_file()?, pipe.write.as_file()?.into()))
+    }
+
+    #[test]
+    fn outgoing_blocking_pipe_stays_responsive_and_expires() -> anyhow::Result<()> {
+        let (mut reader, writer) = blocking_pipe()?;
+        let mut event_loop = calloop::EventLoop::<bool>::try_new()?;
+        let timeout = Duration::from_millis(100);
+        send_bytes(
+            &event_loop.handle(),
+            writer,
+            vec![b'x'; 1024 * 1024],
+            timeout,
+        )?;
+        event_loop
+            .handle()
+            .insert_source(
+                calloop::timer::Timer::from_duration(Duration::from_millis(10)),
+                |_, _, responsive| {
+                    *responsive = true;
+                    calloop::timer::TimeoutAction::Drop
+                },
+            )
+            .map_err(|error| error.error)?;
+
+        // Rescue a regressed blocking callback so this test fails instead of hanging the suite.
+        let (watchdog_sender, watchdog_receiver) = mpsc::channel::<()>();
+        let mut watchdog_reader = reader.try_clone()?;
+        let watchdog = std::thread::spawn(move || -> std::io::Result<bool> {
+            if watchdog_receiver.recv_timeout(Duration::from_secs(1))
+                == Err(mpsc::RecvTimeoutError::Timeout)
+            {
+                watchdog_reader.read_to_end(&mut Vec::new())?;
+                return Ok(true);
+            }
+            Ok(false)
+        });
+        let mut responsive = false;
+        event_loop.dispatch(Some(Duration::from_millis(20)), &mut responsive)?;
+        event_loop.dispatch(Some(Duration::from_millis(20)), &mut responsive)?;
+        drop(watchdog_sender);
+        assert!(!watchdog.join().expect("watchdog panicked")?);
+        assert!(
+            responsive,
+            "another event source must run while the pipe is full"
+        );
+
+        event_loop.dispatch(Some(timeout), &mut responsive)?;
+        filedescriptor::FileDescriptor::dup(&reader)?.set_non_blocking(true)?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        assert!(!bytes.is_empty());
+        assert!(
+            bytes.len() < 1024 * 1024,
+            "the stalled transfer must be cancelled"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn outgoing_partial_writes_complete_with_a_slow_reader() -> anyhow::Result<()> {
+        let (mut reader, writer) = blocking_pipe()?;
+        let expected: Vec<u8> = (0..128 * 1024 + 123)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let mut event_loop = calloop::EventLoop::<()>::try_new()?;
+        send_bytes(
+            &event_loop.handle(),
+            writer,
+            expected.clone(),
+            Duration::from_secs(2),
+        )?;
+        let reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            let mut buffer = [0; 1024];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => return Ok(bytes),
+                    Ok(length) => bytes.extend_from_slice(&buffer[..length]),
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(error),
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !reader.is_finished() && Instant::now() < deadline {
+            event_loop.dispatch(Some(Duration::from_millis(20)), &mut ())?;
+        }
+        let finished = reader.is_finished();
+        drop(event_loop);
+        let received = reader.join().expect("reader panicked")?;
+        assert!(finished, "the completed transfer must close its descriptor");
+        assert_eq!(received, expected);
+        Ok(())
+    }
+
     #[test]
     fn clipboard_html_offer_serves_exact_alternate_and_plain_fallback() {
         let selection = OwnedSelection::new(

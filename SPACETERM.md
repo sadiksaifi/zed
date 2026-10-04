@@ -72,6 +72,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): read KDE window settings only from regular files`
 
 - `fix(gpui_linux): expose bounded exact selection text and typed writes`
+- `fix(gpui_linux): bound nonblocking outgoing Wayland clipboard transfers`
 
 ## Monthly rebase
 
