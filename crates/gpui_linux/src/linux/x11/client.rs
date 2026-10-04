@@ -1814,6 +1814,39 @@ impl LinuxClient for X11Client {
         );
     }
 
+    fn read_selection_text(
+        &self,
+        selection: gpui::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        let state = self.0.borrow();
+        let kind = match selection {
+            gpui::ClipboardSelection::Clipboard => clipboard::ClipboardKind::Clipboard,
+            gpui::ClipboardSelection::Primary => clipboard::ClipboardKind::Primary,
+        };
+        state.clipboard.get_text(kind, max_bytes).ok()
+    }
+
+    fn try_write_selection(
+        &self,
+        selection: gpui::ClipboardSelection,
+        item: gpui::ClipboardItem,
+    ) -> Result<(), gpui::ClipboardWriteError> {
+        let mut state = self.0.borrow_mut();
+        let kind = match selection {
+            gpui::ClipboardSelection::Clipboard => clipboard::ClipboardKind::Clipboard,
+            gpui::ClipboardSelection::Primary => clipboard::ClipboardKind::Primary,
+        };
+        state
+            .clipboard
+            .set_item(&item, kind, clipboard::WaitConfig::None)
+            .map_err(|_| gpui::ClipboardWriteError::Unavailable)?;
+        if selection == gpui::ClipboardSelection::Clipboard {
+            state.clipboard_item.replace(item);
+        }
+        Ok(())
+    }
+
     fn write_to_primary(&self, item: gpui::ClipboardItem) {
         let state = self.0.borrow_mut();
         state

@@ -71,6 +71,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): paste Wayland text offered only as text/plain`
 - `fix(gpui_linux): read KDE window settings only from regular files`
 
+- `fix(gpui_linux): expose bounded exact selection text and typed writes`
+
 ## Monthly rebase
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.

@@ -1526,6 +1526,24 @@ impl App {
         self.platform.window_background_support()
     }
 
+    /// Reads bounded exact UTF-8 text only from the requested native selection.
+    pub fn read_selection_text(
+        &self,
+        selection: crate::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        self.platform.read_selection_text(selection, max_bytes)
+    }
+
+    /// Claims a native selection or returns a content-free availability failure.
+    pub fn try_write_selection(
+        &self,
+        selection: crate::ClipboardSelection,
+        item: ClipboardItem,
+    ) -> Result<(), crate::ClipboardWriteError> {
+        self.platform.try_write_selection(selection, item)
+    }
+
     /// Reads data from the platform clipboard.
     pub fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.platform.read_from_clipboard()

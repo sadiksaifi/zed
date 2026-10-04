@@ -163,20 +163,25 @@ impl<T: ReceiveData> DataOffer<T> {
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
     ) -> Option<String> {
+        // Ordinary Paste retains its existing line-ending normalization.
+        self.read_string_exact(connection, transfer)
+            .map(|text| text.replace("\r\n", "\n"))
+    }
+
+    fn read_string_exact(
+        &self,
+        connection: &Connection,
+        transfer: &mut ClipboardTransfer,
+    ) -> Option<String> {
         let mime_type = self.text_mime_type()?;
         let bytes = self.read_bytes(connection, mime_type, transfer)?;
-        let text_content = match String::from_utf8(bytes) {
-            Ok(content) => content,
-            Err(_) => {
-                log::error!("clipboard text conversion failed");
-                return None;
-            }
-        };
+        String::from_utf8(bytes).ok()
+    }
 
-        // Normalize the text to unix line endings, otherwise
-        // copying from eg: firefox inserts a lot of blank
-        // lines, and that is super annoying.
-        Some(text_content.replace("\r\n", "\n"))
+    fn read_text(&self, connection: &Connection, max_bytes: usize) -> Option<String> {
+        let mut transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        transfer.limit_bytes(max_bytes);
+        self.read_string_exact(connection, &mut transfer)
     }
 
     fn read_file_paths(
@@ -336,6 +341,45 @@ impl Clipboard {
         Some(item)
     }
 
+    pub fn read_text(
+        &self,
+        selection: gpui::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        let max_bytes = max_bytes.min(crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES);
+        match selection {
+            gpui::ClipboardSelection::Clipboard => {
+                let offer = self.current_offer.as_ref()?;
+                if offer.has_mime_type(&self.self_mime) {
+                    return self.contents.as_ref()?.item.bounded_text(max_bytes);
+                }
+                offer.read_text(&self.connection, max_bytes)
+            }
+            gpui::ClipboardSelection::Primary => {
+                let offer = self.current_primary_offer.as_ref()?;
+                if offer.has_mime_type(&self.self_mime) {
+                    return self.primary_contents.as_ref()?.item.bounded_text(max_bytes);
+                }
+                offer.read_text(&self.connection, max_bytes)
+            }
+        }
+    }
+
+    pub fn claim(
+        &mut self,
+        selection: gpui::ClipboardSelection,
+        item: ClipboardItem,
+        serial: Option<super::serial::SelectionSerial>,
+    ) -> Result<(Vec<&'static str>, super::serial::SelectionSerial), gpui::ClipboardWriteError>
+    {
+        let serial = serial.ok_or(gpui::ClipboardWriteError::Unavailable)?;
+        let mime_types = match selection {
+            gpui::ClipboardSelection::Clipboard => self.set(item),
+            gpui::ClipboardSelection::Primary => self.set_primary(item),
+        };
+        Ok((mime_types, serial))
+    }
+
     pub fn send_bytes(&self, fd: OwnedFd, bytes: Vec<u8>) {
         let mut written = 0;
         self.loop_handle
@@ -425,3 +469,7 @@ mod tests {
         assert_eq!(offer(&["image/png", "text/html"]).text_mime_type(), None);
     }
 }
+
+#[cfg(test)]
+#[path = "clipboard_tests.rs"]
+mod native_tests;

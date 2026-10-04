@@ -185,6 +185,8 @@ impl XContext {
 #[derive(Default)]
 struct Selection {
     data: RwLock<Option<Vec<ClipboardData>>>,
+    /// Explicit text for exact self-owned reads, independent of ordinary path alternates.
+    explicit_text: RwLock<Option<String>>,
     /// Mutex around nothing to use with the below condvar.
     mutex: Mutex<()>,
     /// A condvar that is notified when the contents of this clipboard are changed.
@@ -232,6 +234,7 @@ impl Inner {
         data: Vec<ClipboardData>,
         selection: ClipboardKind,
         wait: WaitConfig,
+        explicit_text: Option<String>,
     ) -> Result<()> {
         if self.serve_stopped.load(Ordering::Relaxed) {
             return Err(Error::unknown(
@@ -254,6 +257,7 @@ impl Inner {
         let selection = self.selection_of(selection);
         let mut data_guard = selection.data.write();
         *data_guard = Some(data);
+        *selection.explicit_text.write() = explicit_text;
 
         // Lock the mutex to both ensure that no wakers of `data_changed` can wake us between
         // dropping the `data_guard` and calling `wait[_for]` and that we don't we wake other
@@ -288,8 +292,29 @@ impl Inner {
         selection: ClipboardKind,
         transfer: &mut ClipboardTransfer,
     ) -> Result<ClipboardData> {
+        self.read_limited(formats, selection, transfer, None)
+    }
+
+    fn read_limited(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        transfer: &mut ClipboardTransfer,
+        payload_limit: Option<usize>,
+    ) -> Result<ClipboardData> {
         // if we are the current owner, we can get the current clipboard ourselves
         if self.is_owner(selection)? {
+            if let Some(limit) = payload_limit {
+                let selection = self.selection_of(selection);
+                let text = selection.explicit_text.read();
+                let text = text.as_ref().ok_or(Error::ContentNotAvailable)?;
+                transfer.limit_bytes(limit);
+                transfer.receive(text.len()).map_err(Error::Transfer)?;
+                return Ok(ClipboardData {
+                    bytes: text.as_bytes().to_vec(),
+                    format: self.atoms.UTF8_STRING,
+                });
+            }
             let data = self.selection_of(selection).data.read();
             if let Some(data_list) = &*data {
                 for format in formats {
@@ -325,6 +350,9 @@ impl Inner {
                 }
             };
 
+        if let Some(limit) = payload_limit {
+            transfer.limit_bytes(limit);
+        }
         if let Some(&format) = highest_precedence_format {
             let data = self.read_single(&reader, selection, format, transfer)?;
             if !formats.contains(&data.format) {
@@ -861,6 +889,7 @@ fn serve_requests(context: Arc<Inner>) -> Result<(), Box<dyn std::error::Error>>
                     let selection = context.selection_of(selection);
                     let mut data_guard = selection.data.write();
                     *data_guard = None;
+                    *selection.explicit_text.write() = None;
 
                     // It is important that this mutex is locked at the time of calling
                     // `notify_all` to prevent notifications getting lost in case the sleeping
@@ -1003,7 +1032,12 @@ impl Clipboard {
             bytes: offer.text().unwrap_or_default().as_bytes().to_vec(),
             format: atoms.UTF8_STRING,
         });
-        self.inner.write(data, selection, wait)
+        self.inner.write(
+            data,
+            selection,
+            wait,
+            item.bounded_text(crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES),
+        )
     }
 
     fn image_format_atom(&self, format: ImageFormat) -> Atom {
@@ -1032,7 +1066,7 @@ impl Clipboard {
             bytes: image.bytes,
             format: self.inner.atoms.PNG__MIME,
         }];
-        self.inner.write(data, selection, wait)
+        self.inner.write(data, selection, wait, None)
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
@@ -1087,6 +1121,23 @@ impl Clipboard {
         }
 
         Ok(ClipboardItem::new_string(self.decode_text(result)?))
+    }
+
+    /// Reads only text representations, preserving the owner's UTF-8 bytes.
+    pub(crate) fn get_text(&self, selection: ClipboardKind, max_bytes: usize) -> Result<String> {
+        let atoms = &self.inner.atoms;
+        // STRING is Latin-1, so it cannot satisfy the exact UTF-8 contract.
+        let formats = [
+            atoms.UTF8_STRING,
+            atoms.UTF8_MIME_0,
+            atoms.UTF8_MIME_1,
+            atoms.TEXT_MIME_UNKNOWN,
+        ];
+        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        let data = self
+            .inner
+            .read_limited(&formats, selection, transfer, Some(max_bytes))?;
+        String::from_utf8(data.bytes).map_err(|_| Error::ConversionFailure)
     }
 
     fn text_format_atoms(&self) -> [Atom; 6] {
@@ -1323,7 +1374,14 @@ mod tests {
         std::sync::LazyLock::new(|| Mutex::new(Arc::new(Inner::new().unwrap())));
 
     enum Offer {
-        Mixed { files: bool },
+        Mixed {
+            files: bool,
+        },
+        TextOnly {
+            files: bool,
+            image: bool,
+            text: Option<Vec<u8>>,
+        },
         Direct(usize),
         Incremental(usize),
         Trickle,
@@ -1333,6 +1391,7 @@ mod tests {
     struct Owner {
         stopped: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
+        requests: Arc<Mutex<Vec<Atom>>>,
     }
 
     impl Owner {
@@ -1352,7 +1411,9 @@ mod tests {
                 .unwrap();
             context.conn.flush().unwrap();
             let stopped = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let worker = std::thread::spawn({
+                let requests = requests.clone();
                 let stopped = stopped.clone();
                 move || {
                     let mut incremental: Option<(u32, Atom, Atom, usize)> = None;
@@ -1363,6 +1424,7 @@ mod tests {
                         };
                         match event {
                             Event::SelectionRequest(event) => {
+                                requests.lock().push(event.target);
                                 let mut property = event.property;
                                 if event.target == atoms.TARGETS {
                                     let targets = match &offer {
@@ -1371,6 +1433,19 @@ mod tests {
                                         }
                                         Offer::Mixed { files: false } => {
                                             vec![atoms.PNG__MIME, atoms.UTF8_STRING]
+                                        }
+                                        Offer::TextOnly { files, image, text } => {
+                                            let mut targets = Vec::new();
+                                            if *files {
+                                                targets.push(atoms.URI_LIST);
+                                            }
+                                            if *image {
+                                                targets.push(atoms.PNG__MIME);
+                                            }
+                                            if text.is_some() {
+                                                targets.push(atoms.UTF8_STRING);
+                                            }
+                                            targets
                                         }
                                         _ => vec![atoms.UTF8_STRING],
                                     };
@@ -1386,6 +1461,32 @@ mod tests {
                                         .unwrap()
                                         .check()
                                         .unwrap();
+                                } else if let Offer::TextOnly { files, image, text } = &offer {
+                                    let bytes = if event.target == atoms.UTF8_STRING {
+                                        text.as_deref()
+                                    } else if event.target == atoms.URI_LIST && *files {
+                                        Some(b"file:///tmp/fixture\r\n".as_slice())
+                                    } else if event.target == atoms.PNG__MIME && *image {
+                                        Some(b"image".as_slice())
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(bytes) = bytes {
+                                        context
+                                            .conn
+                                            .change_property8(
+                                                PropMode::REPLACE,
+                                                event.requestor,
+                                                property,
+                                                event.target,
+                                                bytes,
+                                            )
+                                            .unwrap()
+                                            .check()
+                                            .unwrap();
+                                    } else {
+                                        property = NONE;
+                                    }
                                 } else if matches!(offer, Offer::Mixed { .. }) {
                                     let bytes: &[u8] = if event.target == atoms.UTF8_STRING {
                                         b"clipboard text"
@@ -1542,6 +1643,7 @@ mod tests {
             Self {
                 stopped,
                 worker: Some(worker),
+                requests,
             }
         }
     }
@@ -1574,6 +1676,69 @@ mod tests {
                 Some(gpui::ClipboardEntry::ExternalPaths(_))
             ));
             assert_eq!(item.text().as_deref(), Some("clipboard text"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn external_text_only_reads_preserve_utf8_and_bound_each_selection() {
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
+        for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
+            for (files, image, text, expected) in [
+                (false, true, None, None),
+                (true, false, None, None),
+                (
+                    true,
+                    true,
+                    Some(b"a\r\nb".to_vec()),
+                    Some("a\r\nb".to_owned()),
+                ),
+                (false, false, Some(vec![0xff]), None),
+                (false, false, Some(vec![b'x'; 1024]), Some("x".repeat(1024))),
+                (false, false, Some(vec![b'x'; 1025]), None),
+            ] {
+                let owner = Owner::new(selection, Offer::TextOnly { files, image, text });
+                assert_eq!(clipboard.get_text(selection, 1024).ok(), expected);
+                let requests = owner.requests.lock();
+                assert!(!requests.contains(&inner.atoms.URI_LIST));
+                assert!(!requests.contains(&inner.atoms.PNG__MIME));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn text_only_owned_selections_preserve_empty_text_and_limits() {
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
+        for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
+            for text in ["", "a\r\nb", "é"] {
+                clipboard
+                    .set_item(
+                        &ClipboardItem::new_string(text.into()),
+                        selection,
+                        WaitConfig::None,
+                    )
+                    .unwrap();
+                assert_eq!(clipboard.get_text(selection, text.len()).unwrap(), text);
+                if !text.is_empty() {
+                    assert!(clipboard.get_text(selection, text.len() - 1).is_err());
+                }
+            }
+            let item = ClipboardItem {
+                entries: vec![gpui::ClipboardEntry::ExternalPaths(ExternalPaths(
+                    vec!["/tmp/fixture".into()].into(),
+                ))],
+            };
+            clipboard
+                .set_item(&item, selection, WaitConfig::None)
+                .unwrap();
+            assert!(clipboard.get_text(selection, 1024).is_err());
         }
     }
 

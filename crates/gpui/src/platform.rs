@@ -378,6 +378,27 @@ pub trait Platform: 'static {
 
     fn should_auto_hide_scrollbars(&self) -> bool;
 
+    /// Reads only text representations, without normalization or file-path synthesis.
+    /// Unsupported platforms return no text. Implementations enforce `max_bytes` before retaining
+    /// external payloads, with an additional native transfer ceiling.
+    fn read_selection_text(
+        &self,
+        _selection: ClipboardSelection,
+        _max_bytes: usize,
+    ) -> Option<String> {
+        None
+    }
+
+    /// Attempts to claim a selection. Missing native prerequisites leave retained contents intact.
+    /// Success means the request was submitted, without a compositor acknowledgment.
+    fn try_write_selection(
+        &self,
+        _selection: ClipboardSelection,
+        _item: ClipboardItem,
+    ) -> Result<(), ClipboardWriteError> {
+        Err(ClipboardWriteError::Unavailable)
+    }
+
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
     fn write_to_clipboard(&self, item: ClipboardItem);
 
@@ -2794,6 +2815,22 @@ pub struct ClipboardItem {
     pub entries: Vec<ClipboardEntry>,
 }
 
+/// An independently owned native text selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardSelection {
+    /// The selection used by ordinary Copy and Paste.
+    Clipboard,
+    /// The optional primary selection.
+    Primary,
+}
+
+/// A content-free failure to claim a native selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardWriteError {
+    /// Native ownership prerequisites or the selection capability are unavailable.
+    Unavailable,
+}
+
 /// An error produced by [`Platform::read_from_clipboard_async`].
 ///
 /// Callers surface these failures to users, so the variants distinguish
@@ -2901,6 +2938,31 @@ impl ClipboardItem {
         } else {
             None
         }
+    }
+
+    /// Returns only explicit text entries within the byte limit, without synthesizing paths.
+    pub fn bounded_text(&self, max_bytes: usize) -> Option<String> {
+        let mut length = 0usize;
+        let mut has_text = false;
+        for entry in &self.entries {
+            if let ClipboardEntry::String(string) = entry {
+                has_text = true;
+                length = length.checked_add(string.text.len())?;
+                if length > max_bytes {
+                    return None;
+                }
+            }
+        }
+        if !has_text {
+            return None;
+        }
+        let mut text = String::with_capacity(length);
+        for entry in &self.entries {
+            if let ClipboardEntry::String(string) = entry {
+                text.push_str(&string.text);
+            }
+        }
+        Some(text)
     }
 
     /// If this item is one string, returns its HTML alternate without changing its plain text.
@@ -3437,6 +3499,33 @@ mod atlas_tests {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn bounded_clipboard_text_preserves_bytes_without_path_fallback() {
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(crate::ExternalPaths(
+                    vec!["/tmp/fixture".into()].into(),
+                )),
+                ClipboardEntry::String(ClipboardString::new("a\r\n".into())),
+                ClipboardEntry::String(ClipboardString::new("é".into())),
+            ],
+        };
+        assert_eq!(item.bounded_text(5).as_deref(), Some("a\r\né"));
+        assert_eq!(item.bounded_text(4), None);
+        assert_eq!(
+            ClipboardItem::new_string(String::new())
+                .bounded_text(0)
+                .as_deref(),
+            Some("")
+        );
+        let files = ClipboardItem {
+            entries: vec![ClipboardEntry::ExternalPaths(crate::ExternalPaths(
+                vec!["/tmp/fixture".into()].into(),
+            ))],
+        };
+        assert_eq!(files.bounded_text(1024), None);
+    }
 
     #[test]
     fn clipboard_html_alternate_keeps_plain_text_and_metadata() {

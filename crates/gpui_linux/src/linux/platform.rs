@@ -97,6 +97,20 @@ pub(crate) trait LinuxClient {
     }
     fn open_uri(&self, uri: &str);
     fn reveal_path(&self, path: PathBuf);
+    fn read_selection_text(
+        &self,
+        _selection: gpui::ClipboardSelection,
+        _max_bytes: usize,
+    ) -> Option<String> {
+        None
+    }
+    fn try_write_selection(
+        &self,
+        _selection: gpui::ClipboardSelection,
+        _item: ClipboardItem,
+    ) -> Result<(), gpui::ClipboardWriteError> {
+        Err(gpui::ClipboardWriteError::Unavailable)
+    }
     fn write_to_primary(&self, item: ClipboardItem);
     fn write_to_clipboard(&self, item: ClipboardItem);
     fn read_from_primary(&self) -> Option<ClipboardItem>;
@@ -812,6 +826,22 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
         Task::ready(Err(anyhow!("register_url_scheme unimplemented")))
+    }
+
+    fn read_selection_text(
+        &self,
+        selection: gpui::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        self.inner.read_selection_text(selection, max_bytes)
+    }
+
+    fn try_write_selection(
+        &self,
+        selection: gpui::ClipboardSelection,
+        item: ClipboardItem,
+    ) -> Result<(), gpui::ClipboardWriteError> {
+        self.inner.try_write_selection(selection, item)
     }
 
     fn write_to_primary(&self, item: ClipboardItem) {

@@ -1318,54 +1318,69 @@ impl LinuxClient for WaylandClient {
     }
 
     fn write_to_primary(&self, item: gpui::ClipboardItem) {
-        let mut state = self.0.borrow_mut();
-        let (Some(primary_selection_manager), Some(primary_selection)) = (
-            state.globals.primary_selection_manager.clone(),
-            state.primary_selection.clone(),
-        ) else {
-            return;
-        };
-        if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            let mime_types = state.clipboard.set_primary(item);
-            let Some(serial) = state.serial_tracker.selection_serial() else {
-                log::warn!(
-                    "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
-                );
-                return;
-            };
-            let data_source = primary_selection_manager.create_source(&state.globals.qh, ());
-            for mime_type in mime_types {
-                data_source.offer(mime_type.to_string());
-            }
-            data_source.offer(state.clipboard.self_mime());
-            primary_selection.set_selection(Some(&data_source), serial.as_raw());
-        }
+        let _ = self.try_write_selection(gpui::ClipboardSelection::Primary, item);
     }
 
     fn write_to_clipboard(&self, item: gpui::ClipboardItem) {
+        let _ = self.try_write_selection(gpui::ClipboardSelection::Clipboard, item);
+    }
+
+    fn try_write_selection(
+        &self,
+        selection: gpui::ClipboardSelection,
+        item: gpui::ClipboardItem,
+    ) -> Result<(), gpui::ClipboardWriteError> {
         let mut state = self.0.borrow_mut();
-        let (Some(data_device_manager), Some(data_device)) = (
-            state.globals.data_device_manager.clone(),
-            state.data_device.clone(),
-        ) else {
-            return;
-        };
-        if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            let mime_types = state.clipboard.set(item);
-            let Some(serial) = state.serial_tracker.selection_serial() else {
-                log::warn!(
-                    "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
-                );
-                return;
-            };
-            let data_source = data_device_manager
-                .create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
-            for mime_type in mime_types {
-                data_source.offer(mime_type.to_string());
-            }
-            data_source.offer(state.clipboard.self_mime());
-            data_device.set_selection(Some(&data_source), serial.as_raw());
+        if state.mouse_focused_window.is_none() && state.keyboard_focused_window.is_none() {
+            return Err(gpui::ClipboardWriteError::Unavailable);
         }
+        let serial = state.serial_tracker.selection_serial();
+        match selection {
+            gpui::ClipboardSelection::Primary => {
+                let (Some(manager), Some(device)) = (
+                    state.globals.primary_selection_manager.clone(),
+                    state.primary_selection.clone(),
+                ) else {
+                    return Err(gpui::ClipboardWriteError::Unavailable);
+                };
+                let (mime_types, serial) = state.clipboard.claim(selection, item, serial)?;
+                let source = manager.create_source(&state.globals.qh, ());
+                for mime_type in mime_types {
+                    source.offer(mime_type.to_string());
+                }
+                source.offer(state.clipboard.self_mime());
+                device.set_selection(Some(&source), serial.as_raw());
+            }
+            gpui::ClipboardSelection::Clipboard => {
+                let (Some(manager), Some(device)) = (
+                    state.globals.data_device_manager.clone(),
+                    state.data_device.clone(),
+                ) else {
+                    return Err(gpui::ClipboardWriteError::Unavailable);
+                };
+                let (mime_types, serial) = state.clipboard.claim(selection, item, serial)?;
+                let source =
+                    manager.create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
+                for mime_type in mime_types {
+                    source.offer(mime_type.to_string());
+                }
+                source.offer(state.clipboard.self_mime());
+                device.set_selection(Some(&source), serial.as_raw());
+            }
+        }
+        Ok(())
+    }
+
+    fn read_selection_text(
+        &self,
+        selection: gpui::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        let state = self.0.borrow();
+        if selection == gpui::ClipboardSelection::Primary && state.primary_selection.is_none() {
+            return None;
+        }
+        state.clipboard.read_text(selection, max_bytes)
     }
 
     fn read_from_primary(&self) -> Option<gpui::ClipboardItem> {

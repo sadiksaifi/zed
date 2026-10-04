@@ -34,6 +34,11 @@ impl ClipboardTransfer {
         }
     }
 
+    /// Narrows the payload budget after bounded representation negotiation.
+    pub fn limit_bytes(&mut self, max_bytes: usize) {
+        self.remaining_bytes = self.remaining_bytes.min(max_bytes);
+    }
+
     pub fn remaining_time(&self) -> Result<Duration, TransferError> {
         self.deadline
             .checked_duration_since(Instant::now())

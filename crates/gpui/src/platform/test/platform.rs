@@ -702,6 +702,48 @@ impl Platform for TestPlatform {
         false
     }
 
+    fn read_selection_text(
+        &self,
+        selection: crate::ClipboardSelection,
+        max_bytes: usize,
+    ) -> Option<String> {
+        let item = match selection {
+            crate::ClipboardSelection::Clipboard => self.read_from_clipboard(),
+            crate::ClipboardSelection::Primary => {
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                {
+                    self.read_from_primary()
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                {
+                    None
+                }
+            }
+        }?;
+        item.bounded_text(max_bytes)
+    }
+
+    fn try_write_selection(
+        &self,
+        selection: crate::ClipboardSelection,
+        item: ClipboardItem,
+    ) -> Result<(), crate::ClipboardWriteError> {
+        match selection {
+            crate::ClipboardSelection::Clipboard => self.write_to_clipboard(item),
+            crate::ClipboardSelection::Primary => {
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                {
+                    self.write_to_primary(item);
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                {
+                    return Err(crate::ClipboardWriteError::Unavailable);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.current_clipboard_item.lock().clone()
     }

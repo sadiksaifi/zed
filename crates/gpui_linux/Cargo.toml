@@ -140,6 +140,8 @@ x11-clipboard = { version = "0.9.3", optional = true }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
+wayland-server = "0.31.14"
+wayland-protocols = { version = "0.32.9", features = ["client", "server", "unstable"] }
 
 [package.metadata.cargo-shear]
 ignored = ["bitflags", "scap", "x11-clipboard"]
