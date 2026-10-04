@@ -210,7 +210,12 @@ impl A11y {
     /// See the docs for [`Self::active_flag`] and [`Self::active_this_frame`]
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
-        self.active_this_frame = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
+        let active = self.is_enabled() && self.active_flag.load(Ordering::SeqCst);
+        if !active {
+            self.nodes.previous_groups.clear();
+            self.nodes.groups.clear();
+        }
+        self.active_this_frame = active;
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -344,6 +349,7 @@ impl<'a> A11ySubtreeBuilder<'a> {
     /// Returns `false` if a node with this id is already present in the tree,
     /// in which case the node is discarded.
     pub fn push_child(&mut self, id: NodeId, node: accesskit::Node) -> bool {
+        self.nodes.synthetic_parents.insert(self.parent_id);
         let pushed = self.nodes.push_leaf(id, node);
         #[cfg(debug_assertions)]
         if pushed {
@@ -360,6 +366,36 @@ impl<'a> A11ySubtreeBuilder<'a> {
         pushed
     }
 
+    /// Retain this parent's previously published synthetic leaves as a group.
+    /// Returns false after retirement or when the parent has no retained group.
+    /// The caller must preserve child order on the parent and use `update_child`
+    /// for changed leaves. Rebuild with `push_child` when topology changes.
+    pub fn retain_children(&mut self) -> bool {
+        let Some(mut group) = self.nodes.previous_groups.remove(&self.parent_id) else {
+            return false;
+        };
+        group.reused = true;
+        self.nodes.groups.insert(self.parent_id, group);
+        true
+    }
+
+    /// Update a retained synthetic leaf without appending another child reference.
+    pub fn update_child(&mut self, id: NodeId, node: accesskit::Node) -> bool {
+        if !self
+            .nodes
+            .groups
+            .get(&self.parent_id)
+            .is_some_and(|group| group.ids.contains(&id))
+        {
+            return false;
+        }
+        if !self.nodes.can_push(id) {
+            return false;
+        }
+        self.nodes.all_nodes.push((id, node));
+        true
+    }
+
     /// A mutable reference to the parent node.
     pub fn parent_node(&mut self) -> &mut accesskit::Node {
         self.nodes
@@ -368,7 +404,16 @@ impl<'a> A11ySubtreeBuilder<'a> {
     }
 }
 
+struct RetainedChildren {
+    parent: accesskit::Node,
+    ids: FxHashSet<NodeId>,
+    reused: bool,
+}
+
 pub(crate) struct A11yNodeBuilder {
+    previous_groups: FxHashMap<NodeId, RetainedChildren>,
+    groups: FxHashMap<NodeId, RetainedChildren>,
+    synthetic_parents: FxHashSet<NodeId>,
     ids_stack: SmallVec<[NodeId; 16]>,
     nodes_stack: SmallVec<[accesskit::Node; 16]>,
     /// This is the exact type required by accesskit, so we can't just make it a
@@ -390,6 +435,9 @@ pub(crate) struct A11yNodeBuilder {
 impl A11yNodeBuilder {
     fn new() -> Self {
         Self {
+            previous_groups: FxHashMap::default(),
+            groups: FxHashMap::default(),
+            synthetic_parents: FxHashSet::default(),
             ids_stack: SmallVec::new(),
             nodes_stack: SmallVec::new(),
             all_nodes: Vec::new(),
@@ -466,12 +514,24 @@ impl A11yNodeBuilder {
         debug_assert!(self.ids_stack.len() > 1, "pop would remove the root node");
 
         if let (Some(id), Some(node)) = (self.ids_stack.pop(), self.nodes_stack.pop()) {
+            if self.synthetic_parents.contains(&id) {
+                self.groups.insert(
+                    id,
+                    RetainedChildren {
+                        ids: node.children().iter().copied().collect(),
+                        parent: node.clone(),
+                        reused: false,
+                    },
+                );
+            }
             self.all_nodes.push((id, node));
         }
     }
 
     /// Push the root node to start a new frame.
     fn begin_frame(&mut self, window_title: Option<&SharedString>) {
+        self.previous_groups = std::mem::take(&mut self.groups);
+        self.synthetic_parents.clear();
         self.all_nodes.clear();
         self.ids_stack.clear();
         self.nodes_stack.clear();
@@ -583,11 +643,41 @@ impl A11yNodeBuilder {
             focus,
         };
 
-        Self::repair_tree_update(update)
+        self.repair_retained_tree_update(update)
+    }
+
+    fn repair_retained_tree_update(&mut self, mut update: TreeUpdate) -> TreeUpdate {
+        let node_ids: FxHashSet<_> = update.nodes.iter().map(|(id, _)| *id).collect();
+        let known = |id: &NodeId| {
+            node_ids.contains(id) || self.groups.values().any(|group| group.ids.contains(id))
+        };
+        if !known(&update.focus) {
+            update.focus = ROOT_NODE_ID;
+        }
+        for (id, node) in &mut update.nodes {
+            if let Some(group) = self.groups.get(id)
+                && group.reused
+                && group.parent.children().len() == node.children().len()
+                && std::ptr::eq(group.parent.children().as_ptr(), node.children().as_ptr())
+            {
+                continue;
+            }
+            if node.children().iter().any(|child| !known(child)) {
+                node.set_children(
+                    node.children()
+                        .iter()
+                        .copied()
+                        .filter(known)
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        update
     }
 
     /// Accesskit panics on invalid [`TreeUpdate`]s. This function defensively
     /// checks invariants that accesskit panics on, and tries to fix them.
+    #[cfg(test)]
     fn repair_tree_update(mut update: TreeUpdate) -> TreeUpdate {
         let node_ids: FxHashSet<NodeId> = update.nodes.iter().map(|(id, _)| *id).collect();
 

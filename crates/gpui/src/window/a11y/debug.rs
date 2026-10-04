@@ -56,6 +56,7 @@ pub(crate) struct NodeCreator {
 #[derive(Default)]
 pub(crate) struct A11yDebug {
     last_tree_update: Option<TreeUpdate>,
+    retained_nodes: FxHashMap<NodeId, accesskit::Node>,
     last_gpui_focus: Option<NodeId>,
     last_active_descendant: Option<NodeId>,
     /// Monotonic counter incremented on each captured frame, so a re-dump makes
@@ -76,7 +77,43 @@ impl A11yDebug {
         window_title: Option<&SharedString>,
         frame: FrameDebugInfo,
     ) {
-        self.last_tree_update = Some(update.clone());
+        let mut removed = Vec::new();
+        let updated: collections::FxHashSet<_> = update.nodes.iter().map(|(id, _)| *id).collect();
+        for (id, node) in &update.nodes {
+            if let Some(old) = self.retained_nodes.get(id) {
+                if old.children().len() == node.children().len()
+                    && std::ptr::eq(old.children().as_ptr(), node.children().as_ptr())
+                {
+                    continue;
+                }
+                let children: collections::FxHashSet<_> = node.children().iter().copied().collect();
+                removed.extend(
+                    old.children()
+                        .iter()
+                        .filter(|child| !children.contains(child))
+                        .copied(),
+                );
+            }
+        }
+        for (id, node) in &update.nodes {
+            self.retained_nodes.insert(*id, node.clone());
+        }
+        while let Some(id) = removed.pop() {
+            if updated.contains(&id) {
+                continue;
+            }
+            if let Some(node) = self.retained_nodes.remove(&id) {
+                removed.extend(node.children().iter().copied());
+                #[cfg(debug_assertions)]
+                self.last_node_info.remove(&id);
+            }
+        }
+        self.last_tree_update = Some(TreeUpdate {
+            nodes: Vec::new(),
+            tree: update.tree.clone(),
+            tree_id: update.tree_id,
+            focus: update.focus,
+        });
         self.last_gpui_focus = gpui_focus;
         self.last_active_descendant = active_descendant;
         self.frame_number += 1;
@@ -84,7 +121,7 @@ impl A11yDebug {
             rendered_at: chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false),
             frame_number: self.frame_number,
             window_title: window_title.cloned(),
-            node_count: update.nodes.len(),
+            node_count: self.retained_nodes.len(),
             tab_stop_count: frame.tab_stop_count,
             viewport_size: frame.viewport_size,
             scale_factor: frame.scale_factor,
@@ -93,13 +130,32 @@ impl A11yDebug {
 
     #[cfg(debug_assertions)]
     pub(crate) fn capture_node_info(&mut self, node_info: &FxHashMap<NodeId, NodeDebugInfo>) {
-        self.last_node_info = node_info.clone();
+        self.last_node_info
+            .extend(node_info.iter().map(|(id, info)| (*id, info.clone())));
     }
 
     /// Serialize the last tree update to a readable JSON string. Node ids are
     /// replaced with short ephemeral ids (`a`, `b`, ..., `z`, `aa`, ...).
     pub(crate) fn to_json(&self) -> Option<String> {
-        let update = self.last_tree_update.as_ref()?;
+        let last = self.last_tree_update.as_ref()?;
+        let mut pending = vec![last.tree.as_ref()?.root];
+        let mut nodes = Vec::new();
+        let mut visited = collections::FxHashSet::default();
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if let Some(node) = self.retained_nodes.get(&id) {
+                pending.extend(node.children().iter().rev().copied());
+                nodes.push((id, node.clone()));
+            }
+        }
+        let update = &TreeUpdate {
+            nodes,
+            tree: last.tree.clone(),
+            tree_id: last.tree_id,
+            focus: last.focus,
+        };
 
         let mut ephemeral: FxHashMap<NodeId, String> = FxHashMap::default();
         for (index, (id, _)) in update.nodes.iter().enumerate() {
