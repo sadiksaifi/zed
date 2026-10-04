@@ -30,7 +30,9 @@ use wayland_protocols::{
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
-use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
+use crate::linux::wayland::{
+    decoration::ToplevelDecoration, display::WaylandDisplay, serial::SerialKind,
+};
 use crate::linux::{
     Globals, Output, PendingActivation, TitlebarDoubleClickAction, WaylandClientStatePtr,
     get_window,
@@ -121,7 +123,6 @@ pub struct WaylandWindowState {
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
     decorations: WindowDecorations,
-    requested_decorations: WindowDecorations,
     background_appearance: WindowBackgroundAppearance,
     fullscreen: bool,
     maximized: bool,
@@ -288,13 +289,14 @@ impl WaylandSurfaceState {
             None
         };
 
-        // Attempt to set up window decorations based on the requested configuration
-        let decoration = globals
-            .decoration_manager
-            .as_ref()
-            .map(|decoration_manager| {
-                decoration_manager.get_toplevel_decoration(&toplevel, &globals.qh, surface.id())
-            });
+        let decoration = ToplevelDecoration::new(params.window_decorations, || {
+            globals
+                .decoration_manager
+                .as_ref()
+                .map(|decoration_manager| {
+                    decoration_manager.get_toplevel_decoration(&toplevel, &globals.qh, surface.id())
+                })
+        });
 
         Ok(WaylandSurfaceState::Xdg(WaylandXdgSurfaceState {
             xdg_surface,
@@ -308,7 +310,7 @@ impl WaylandSurfaceState {
 pub struct WaylandXdgSurfaceState {
     xdg_surface: xdg_surface::XdgSurface,
     toplevel: xdg_toplevel::XdgToplevel,
-    decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
+    decoration: ToplevelDecoration<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
     dialog: Option<XdgDialogV1>,
 }
 
@@ -391,9 +393,12 @@ impl WaylandSurfaceState {
         }
     }
 
-    fn decoration(&self) -> Option<&zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1> {
+    fn decoration_mut(
+        &mut self,
+    ) -> Option<&mut ToplevelDecoration<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>>
+    {
         if let WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { decoration, .. }) = self {
-            decoration.as_ref()
+            Some(decoration)
         } else {
             None
         }
@@ -517,9 +522,13 @@ impl WaylandSurfaceState {
             WaylandSurfaceState::Xdg(WaylandXdgSurfaceState {
                 xdg_surface,
                 toplevel,
-                decoration: _decoration,
+                decoration,
                 dialog,
             }) => {
+                // Decorations must be destroyed before the toplevel.
+                // See https://wayland.app/protocols/xdg-decoration-unstable-v1#zxdg_toplevel_decoration_v1
+                decoration.destroy();
+
                 // drop the dialog before toplevel so compositor can explicitly unapply it's effects
                 if let Some(dialog) = dialog {
                     dialog.destroy();
@@ -624,7 +633,6 @@ impl WaylandWindowState {
             scale: 1.0,
             input_handler: None,
             decorations: WindowDecorations::Client,
-            requested_decorations: options.window_decorations,
             background_appearance: WindowBackgroundAppearance::Opaque,
             fullscreen: false,
             maximized: false,
@@ -837,14 +845,8 @@ impl Drop for WaylandWindow {
             blur.release();
         }
 
-        // Decorations must be destroyed before the xdg state.
-        // See https://wayland.app/protocols/xdg-decoration-unstable-v1#zxdg_toplevel_decoration_v1
-        if let Some(decoration) = &state.surface_state.decoration() {
-            decoration.destroy();
-        }
-
-        // Surface state might contain xdg_toplevel/xdg_surface which can be destroyed now that
-        // decorations are gone. layer_surface has no dependencies.
+        // Surface state might contain decorations, xdg_toplevel and xdg_surface, which it destroys
+        // in protocol order. layer_surface has no dependencies.
         state.surface_state.destroy();
 
         // Viewport must be destroyed before the wl_surface.
@@ -1234,10 +1236,6 @@ impl WaylandWindowStatePtr {
                     return;
                 }
             };
-            let decorations = crate::linux::window_frame::configured_decorations(
-                self.state.borrow().requested_decorations,
-                decorations,
-            );
             let size = self.state.borrow_mut().set_decoration_mode(decorations);
             if let Some(size) = size {
                 self.resize(size);
@@ -2298,23 +2296,11 @@ impl PlatformWindow for WaylandWindow {
 
     fn request_decorations(&self, decorations: WindowDecorations) {
         let mut state = self.borrow_mut();
-        state.requested_decorations = decorations;
-        match state.surface_state.decoration().as_ref() {
-            Some(decoration) => {
-                decoration.set_mode(decorations.to_xdg());
-                state.decorations = decorations;
-                update_window(state);
-            }
-            None => {
-                if matches!(decorations, WindowDecorations::Server) {
-                    log::info!(
-                        "Server-side decorations requested, but the Wayland server does not support them. Falling back to client-side decorations."
-                    );
-                }
-                state.decorations = WindowDecorations::Client;
-                update_window(state);
-            }
-        }
+        state.decorations = match state.surface_state.decoration_mut() {
+            Some(decoration) => decoration.request(decorations),
+            None => WindowDecorations::Client,
+        };
+        update_window(state);
         self.0.request_redraw();
     }
 
@@ -2466,19 +2452,6 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
     }
 
     region.destroy();
-}
-
-pub(crate) trait WindowDecorationsExt {
-    fn to_xdg(self) -> zxdg_toplevel_decoration_v1::Mode;
-}
-
-impl WindowDecorationsExt for WindowDecorations {
-    fn to_xdg(self) -> zxdg_toplevel_decoration_v1::Mode {
-        match self {
-            WindowDecorations::Client => zxdg_toplevel_decoration_v1::Mode::ClientSide,
-            WindowDecorations::Server => zxdg_toplevel_decoration_v1::Mode::ServerSide,
-        }
-    }
 }
 
 pub(crate) trait ResizeEdgeWaylandExt {

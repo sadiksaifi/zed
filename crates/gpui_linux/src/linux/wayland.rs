@@ -1,6 +1,7 @@
 mod client;
 mod clipboard;
 mod cursor;
+mod decoration;
 mod display;
 mod popup;
 mod scroll_gesture;

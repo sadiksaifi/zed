@@ -67,6 +67,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 - `feat(gpui_linux): follow native titlebar click actions and live KDE window settings`
 - `fix(gpui_linux): retain explicitly requested client decorations on Wayland`
+- `fix(gpui_linux): keep client-decorated Wayland windows free of server decorations`
 
 ## Monthly rebase
 
