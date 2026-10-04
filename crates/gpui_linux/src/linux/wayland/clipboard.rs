@@ -21,13 +21,13 @@ use crate::linux::{
 };
 use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 
-/// Text mime types that we'll offer to other programs.
+/// Text mime types offered to and accepted from other programs, in preference order.
+///
+/// `text/plain` names no charset, so it is the last choice. GPUI writes it as UTF-8 and accepts it
+/// only when its contents are valid UTF-8.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 pub(crate) const FILE_LIST_MIME_TYPE: &str = URI_LIST_MIME_TYPE;
-
-/// Text mime types that we'll accept from other programs.
-pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -151,16 +151,19 @@ impl<T: ReceiveData> DataOffer<T> {
         }
     }
 
+    /// The most preferred text mime type this offer contains.
+    fn text_mime_type(&self) -> Option<&'static str> {
+        TEXT_MIME_TYPES
+            .into_iter()
+            .find(|mime_type| self.has_mime_type(mime_type))
+    }
+
     fn read_string(
         &self,
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
     ) -> Option<String> {
-        let mime_type = self.mime_types.iter().find(|&mime_type| {
-            ALLOWED_TEXT_MIME_TYPES
-                .iter()
-                .any(|&allowed| allowed == mime_type)
-        })?;
+        let mime_type = self.text_mime_type()?;
         let bytes = self.read_bytes(connection, mime_type, transfer)?;
         let text_content = match String::from_utf8(bytes) {
             Ok(content) => content,
@@ -389,5 +392,36 @@ mod tests {
         let plain = OwnedSelection::new(ClipboardItem::new_string("plain".into()));
         assert!(!plain.mime_types().contains(&HTML_MIME_TYPE));
         assert_eq!(plain.bytes_for(HTML_MIME_TYPE), None);
+    }
+
+    struct FakeOffer;
+
+    impl ReceiveData for FakeOffer {
+        fn receive_data(&self, _mime_type: String, _fd: BorrowedFd<'_>) {}
+    }
+
+    fn offer(mime_types: &[&str]) -> DataOffer<FakeOffer> {
+        let mut offer = DataOffer::new(FakeOffer);
+        for mime_type in mime_types {
+            offer.add_mime_type((*mime_type).to_string());
+        }
+        offer
+    }
+
+    #[test]
+    fn text_offers_prefer_explicit_utf8_types_over_plain_text() {
+        assert_eq!(
+            offer(&["text/plain", "UTF8_STRING", "text/plain;charset=utf-8"]).text_mime_type(),
+            Some("text/plain;charset=utf-8")
+        );
+        assert_eq!(
+            offer(&["text/plain", "UTF8_STRING"]).text_mime_type(),
+            Some("UTF8_STRING")
+        );
+        assert_eq!(
+            offer(&["image/png", "text/plain"]).text_mime_type(),
+            Some("text/plain")
+        );
+        assert_eq!(offer(&["image/png", "text/html"]).text_mime_type(), None);
     }
 }
