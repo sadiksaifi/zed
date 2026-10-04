@@ -1,6 +1,14 @@
 use super::{TitlebarDoubleClickAction, xdg_desktop_portal::Event};
 use gpui::{MouseButton, WindowButton, WindowButtonLayout};
-use std::{collections::HashMap, io::Read, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs::OpenOptions,
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
+    path::{Path, PathBuf},
+};
+
+const CONFIG_SIZE_LIMIT: u64 = 64 * 1024;
 
 pub(crate) fn is_kde() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP")
@@ -127,18 +135,31 @@ pub(crate) fn config_path() -> Option<PathBuf> {
 }
 pub(crate) fn read() -> KdeWindowSettings {
     config_path()
-        .and_then(|path| {
-            let mut contents = String::new();
-            std::fs::File::open(path)
-                .ok()?
-                .take(64 * 1024 + 1)
-                .read_to_string(&mut contents)
-                .ok()?;
-            (contents.len() <= 64 * 1024).then_some(contents)
-        })
+        .and_then(|path| read_config(&path))
         .map_or_else(KdeWindowSettings::default, |contents| {
             KdeWindowSettings::parse(&contents)
         })
+}
+
+/// Reads a regular configuration file of at most [`CONFIG_SIZE_LIMIT`] bytes.
+///
+/// The nonblocking open keeps a FIFO without a writer, or a device, from blocking the open, and
+/// the check on the opened handle rejects it before any read can wait for data. The standard
+/// library opens every file close-on-exec.
+fn read_config(path: &Path) -> Option<String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(CONFIG_SIZE_LIMIT + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    (contents.len() as u64 <= CONFIG_SIZE_LIMIT).then_some(contents)
 }
 
 #[cfg(test)]
@@ -194,5 +215,41 @@ mod tests {
             }
         );
         assert_eq!(kde_action("Shade"), TitlebarDoubleClickAction::None);
+    }
+
+    #[test]
+    fn kde_config_reads_only_bounded_regular_files() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let regular = directory.path().join("kwinrc");
+        std::fs::write(&regular, "[Windows]\n").unwrap();
+        assert_eq!(read_config(&regular).as_deref(), Some("[Windows]\n"));
+
+        let oversized = directory.path().join("oversized");
+        std::fs::write(&oversized, vec![b'#'; CONFIG_SIZE_LIMIT as usize + 1]).unwrap();
+        assert_eq!(read_config(&oversized), None);
+
+        assert_eq!(read_config(directory.path()), None);
+        assert_eq!(read_config(&directory.path().join("missing")), None);
+    }
+
+    #[test]
+    fn kde_config_rejects_a_fifo_without_a_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("kwinrc");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read_config(&fifo)));
+        let result = receiver.recv_timeout(std::time::Duration::from_secs(5));
+        if result.is_err() {
+            // Unblock the reader so the test process can exit.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(directory.path().join("kwinrc"))
+                .ok();
+        }
+        assert_eq!(result, Ok(None));
     }
 }

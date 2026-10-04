@@ -69,6 +69,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): retain explicitly requested client decorations on Wayland`
 - `fix(gpui_linux): keep client-decorated Wayland windows free of server decorations`
 - `fix(gpui_linux): paste Wayland text offered only as text/plain`
+- `fix(gpui_linux): read KDE window settings only from regular files`
 
 ## Monthly rebase
 
