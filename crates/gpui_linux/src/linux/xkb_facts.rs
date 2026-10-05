@@ -40,12 +40,12 @@ pub(super) fn native_key_event(state: &xkb::State, keycode: Keycode) -> NativeKe
     }
 }
 
-/// The modifier keys pressed and not yet released, with the modifiers each press set.
+/// The modifier keys pressed and not yet released, with what each press did.
 ///
 /// XKB clears the modifiers a key's press set when the key is released, whatever level or layout
 /// is active by then. The aggregate states display servers send carry no such history, so each
-/// press records what it set, and its release clears that instead of replaying the key in the
-/// current state.
+/// press records what it set and the modifier key it acted as, and its release clears and
+/// reports those instead of replaying the key in the current state.
 #[derive(Default)]
 pub(super) struct HeldModifierKeys(Vec<HeldModifierKey>);
 
@@ -53,37 +53,58 @@ struct HeldModifierKey {
     keycode: Keycode,
     /// The modifiers the press set, which the release clears.
     mods: xkb::ModMask,
+    /// The modifier key the press acted as, which the release reports too.
+    role: Option<ModifierRole>,
 }
 
 impl HeldModifierKeys {
+    /// Whether `keycode`'s press or release in `state` is a modifier key's own. A key pressed as
+    /// a modifier key releases as one, whatever its keysym is by then.
+    pub(super) fn is_modifier_key(&self, state: &xkb::State, keycode: Keycode) -> bool {
+        self.0.iter().any(|held| held.keycode == keycode)
+            || state.key_get_one_sym(keycode).is_modifier_key()
+    }
+
     /// The facts for modifier key `keycode`'s press. `state` is the state before the press, and
     /// the reported modifiers and locks are the state after it, applied exactly as XKB applies it.
     pub(super) fn press(&mut self, state: &xkb::State, keycode: Keycode) -> NativeKeyEvent {
         let mods = modifiers_set_by_press(state, keycode);
+        let role = modifier_role(state, keycode, mods);
         self.0.retain(|held| held.keycode != keycode);
-        self.0.push(HeldModifierKey { keycode, mods });
+        self.0.push(HeldModifierKey {
+            keycode,
+            mods,
+            role,
+        });
         let mut after =
             state_with_depressed_mods(state, state.serialize_mods(xkb::STATE_MODS_DEPRESSED));
         after.update_key(keycode, KeyDirection::Down);
-        modifier_key_event(state, &after, keycode, true)
+        modifier_key_event(&after, keycode, true, role)
     }
 
     /// The facts for modifier key `keycode`'s release. `state` is the state before the release,
     /// and the reported modifiers and locks are the state after it.
     ///
-    /// The release clears the modifiers its press set unless the press of another key in
-    /// `held_keys` also set them. A key whose press went unseen, such as one held before the
-    /// window gained focus, contributes the modifiers it sets alone in `state`'s layout. Lock
-    /// changes that XKB applies on release arrive with the next aggregate modifier state.
+    /// The release reports its press's role and clears the modifiers its press set unless the
+    /// press of another key in `held_keys` also set them. A key whose press went unseen, such as
+    /// one held before the window gained focus, counts as setting what it sets alone in `state`'s
+    /// layout. Lock changes that XKB applies on release arrive with the next aggregate modifier
+    /// state.
     pub(super) fn release(
         &mut self,
         state: &xkb::State,
         keycode: Keycode,
         held_keys: impl Iterator<Item = Keycode>,
     ) -> NativeKeyEvent {
-        let released_mods = match self.0.iter().position(|held| held.keycode == keycode) {
-            Some(index) => self.0.swap_remove(index).mods,
-            None => modifiers_set_while_held(state, std::iter::once(keycode)),
+        let (released_mods, role) = match self.0.iter().position(|held| held.keycode == keycode) {
+            Some(index) => {
+                let released = self.0.swap_remove(index);
+                (released.mods, released.role)
+            }
+            None => {
+                let mods = modifiers_set_while_held(state, std::iter::once(keycode));
+                (mods, modifier_role(state, keycode, mods))
+            }
         };
         let mut held_mods = 0;
         let mut unseen_keys = Vec::new();
@@ -100,7 +121,7 @@ impl HeldModifierKeys {
             state,
             state.serialize_mods(xkb::STATE_MODS_DEPRESSED) & !(released_mods & !held_mods),
         );
-        modifier_key_event(state, &after, keycode, false)
+        modifier_key_event(&after, keycode, false, role)
     }
 
     /// Forgets every press, for when the keys held stop being followed, such as on focus loss.
@@ -109,13 +130,12 @@ impl HeldModifierKeys {
     }
 }
 
-/// The facts for a modifier key's own press or release, from `state` before the transition and
-/// `after` it.
+/// The facts for a modifier key's own press or release, with the state `after` it.
 fn modifier_key_event(
-    state: &xkb::State,
     after: &xkb::State,
     keycode: Keycode,
     pressed: bool,
+    role: Option<ModifierRole>,
 ) -> NativeKeyEvent {
     let scancode = evdev_scancode(keycode);
     NativeKeyEvent {
@@ -126,7 +146,7 @@ fn modifier_key_event(
         caps_lock: after.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE),
         num_lock: after.mod_name_is_active(xkb::MOD_NAME_NUM, xkb::STATE_MODS_EFFECTIVE),
         modifier_key: Some((scancode, pressed)),
-        modifier_role: modifier_role(state, keycode),
+        modifier_role: role,
     }
 }
 
@@ -143,24 +163,28 @@ fn modifiers_set_by_press(state: &xkb::State, keycode: Keycode) -> xkb::ModMask 
     set & !pressed.serialize_mods(xkb::STATE_MODS_DEPRESSED)
 }
 
-/// The modifier key `keycode` acts as in `state`'s layout. XKB options can bind a modifier to any
-/// key, and the keysym need not name it: `caps:ctrl_modifier` keeps `Caps_Lock` but sets Control.
-/// So the single portable modifier the key sets while held decides the role, and the keysym
-/// decides its side. A key that sets none can still name a lock.
-fn modifier_role(state: &xkb::State, keycode: Keycode) -> Option<ModifierRole> {
-    let held = modifiers_from_mask(
-        &state.get_keymap(),
-        modifiers_set_while_held(state, std::iter::once(keycode)),
-    );
-    let keysym = state.key_get_one_sym(keycode);
+/// The modifier key `keycode` acts as when its press in `state` sets `mods`. XKB options can bind
+/// a modifier to any key, and the keysym need not name it: `caps:ctrl_modifier` keeps
+/// `Caps_Lock` but sets Control. So the single portable modifier the press sets decides the
+/// role, and the key's first-level keysym decides its side, since other levels can name a layout
+/// switch instead, as with `grp:shifts_toggle`. A press that sets none can still toggle a lock.
+fn modifier_role(state: &xkb::State, keycode: Keycode, mods: xkb::ModMask) -> Option<ModifierRole> {
+    let keymap = state.get_keymap();
+    let held = modifiers_from_mask(&keymap, mods);
+    let first_level = keymap
+        .key_get_syms_by_level(keycode, state.key_get_layout(keycode), 0)
+        .first()
+        .copied();
     let right = matches!(
-        keysym,
-        Keysym::Shift_R
-            | Keysym::Control_R
-            | Keysym::Alt_R
-            | Keysym::Meta_R
-            | Keysym::Super_R
-            | Keysym::Hyper_R
+        first_level,
+        Some(
+            Keysym::Shift_R
+                | Keysym::Control_R
+                | Keysym::Alt_R
+                | Keysym::Meta_R
+                | Keysym::Super_R
+                | Keysym::Hyper_R
+        )
     );
     let sided = |left, right_role| Some(if right { right_role } else { left });
     match (held.shift, held.control, held.alt, held.platform) {
@@ -170,7 +194,7 @@ fn modifier_role(state: &xkb::State, keycode: Keycode) -> Option<ModifierRole> {
         (false, false, false, true) => {
             sided(ModifierRole::PlatformLeft, ModifierRole::PlatformRight)
         }
-        _ => match keysym {
+        _ => match state.key_get_one_sym(keycode) {
             Keysym::Caps_Lock => Some(ModifierRole::CapsLock),
             Keysym::Num_Lock => Some(ModifierRole::NumLock),
             _ => None,
@@ -603,6 +627,81 @@ mod tests {
                 assert_eq!(reported[3].modifiers, Modifiers::none());
             }
         }
+    }
+
+    #[test]
+    fn a_release_reports_the_modifier_key_its_press_acted_as() {
+        // With Shift held, the other Shift key switches layouts and acts as no modifier key,
+        // and its keysym no longer names its side.
+        let shifts_toggle = keymap("us,de", Some("grp:shifts_toggle"));
+        for (first, second, role) in [
+            ("RTSH", "LFSH", ModifierRole::ShiftRight),
+            ("LFSH", "RTSH", ModifierRole::ShiftLeft),
+        ] {
+            let mut state = xkb::State::new(&shifts_toggle);
+            let reported = replay(
+                &mut state,
+                &transitions(
+                    &shifts_toggle,
+                    &[
+                        (first, true),
+                        (second, true),
+                        (first, false),
+                        (second, false),
+                    ],
+                ),
+            );
+            let roles = reported.iter().map(|native| native.modifier_role);
+            assert_eq!(
+                roles.collect::<Vec<_>>(),
+                [Some(role), None, Some(role), None],
+                "{first} {second}"
+            );
+        }
+
+        // RALT is Alt in the US layout and AltGr in the German one.
+        let keymap = keymap("us,de", Some("grp:caps_toggle"));
+        let mut state = xkb::State::new(&keymap);
+        let reported = replay(
+            &mut state,
+            &transitions(
+                &keymap,
+                &[
+                    ("RALT", true),
+                    ("CAPS", true),
+                    ("CAPS", false),
+                    ("RALT", false),
+                ],
+            ),
+        );
+        assert_eq!(reported[0].modifier_role, Some(ModifierRole::AltRight));
+        assert_eq!(reported[3].modifier_role, Some(ModifierRole::AltRight));
+    }
+
+    #[test]
+    fn a_key_pressed_as_a_modifier_key_releases_as_one() {
+        // Alt+Space switches layouts, and Space alone types a space.
+        let keymap = keymap("us,de", Some("grp:alt_space_toggle"));
+        let left_alt = key(&keymap, "LALT");
+        let space = key(&keymap, "SPCE");
+        let mut state = xkb::State::new(&keymap);
+        let mut held = HeldModifierKeys::default();
+        assert!(!held.is_modifier_key(&state, space));
+        assert!(held.is_modifier_key(&state, left_alt));
+        held.press(&state, left_alt);
+        press(&mut state, left_alt);
+        assert!(held.is_modifier_key(&state, space));
+        held.press(&state, space);
+        press(&mut state, space);
+        held.release(&state, left_alt, [space].into_iter());
+        release(&mut state, left_alt);
+
+        assert_eq!(state.key_get_one_sym(space), Keysym::space);
+        assert!(held.is_modifier_key(&state, space));
+        let released = held.release(&state, space, std::iter::empty());
+        assert_eq!(released.modifier_key, Some((57, false)));
+        release(&mut state, space);
+        assert!(!held.is_modifier_key(&state, space));
     }
 
     #[test]

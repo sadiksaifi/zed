@@ -2102,7 +2102,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                 let keymap_state = state.keymap_state.as_ref().unwrap();
                 let keysym = keymap_state.key_get_one_sym(keycode);
 
-                if keysym.is_modifier_key() {
+                if state
+                    .held_modifier_keys
+                    .is_modifier_key(keymap_state, keycode)
+                {
                     // The compositor reports the resulting modifier state separately, after
                     // this key event.
                     let client = &mut *state;

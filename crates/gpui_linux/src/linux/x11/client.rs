@@ -1144,7 +1144,10 @@ impl X11Client {
                 let code = event.detail.into();
                 let keysym = key_event_state.key_get_one_sym(code);
 
-                if keysym.is_modifier_key() {
+                if state
+                    .held_modifier_keys
+                    .is_modifier_key(&key_event_state, code)
+                {
                     if is_held {
                         return Some(());
                     }
@@ -1207,9 +1210,11 @@ impl X11Client {
                 }
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
                 let code = event.detail.into();
-                let keysym = key_event_state.key_get_one_sym(code);
 
-                if keysym.is_modifier_key() {
+                if state
+                    .held_modifier_keys
+                    .is_modifier_key(&key_event_state, code)
+                {
                     let client = &mut *state;
                     let native = client.held_modifier_keys.release(
                         &key_event_state,

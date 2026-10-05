@@ -108,8 +108,9 @@ pub struct NativeKeyEvent {
     pub modifier_key: Option<(u16, bool)>,
     /// For a modifier key's own press or release, the modifier key the active keymap makes it
     /// act as, which keymap options can move to another physical key. For example, XKB's
-    /// `caps:ctrl_modifier` makes Caps Lock act as left Control. `None` for other keys and for
-    /// modifier keys without such a role, such as AltGr.
+    /// `caps:ctrl_modifier` makes Caps Lock act as left Control. A release reports the role of
+    /// its press, even after the layout changes. `None` for other keys and for presses that act
+    /// as no such modifier key, such as AltGr.
     pub modifier_role: Option<ModifierRole>,
 }
 
