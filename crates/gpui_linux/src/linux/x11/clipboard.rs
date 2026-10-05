@@ -209,6 +209,15 @@ struct ClipboardData {
     format: Atom,
 }
 
+/// Where a read is answered from, decided once when the read starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadSource {
+    /// The contents this client retains for a selection it owns.
+    Retained,
+    /// A transfer from the selection's owner, another client.
+    Owner,
+}
+
 enum ReadSelNotifyResult {
     GotData(ClipboardData),
     IncrStarted,
@@ -296,41 +305,64 @@ impl Inner {
         &self,
         formats: &[Atom],
         selection: ClipboardKind,
+        source: ReadSource,
         transfer: &mut ClipboardTransfer,
     ) -> Result<ClipboardData> {
-        self.read_limited(formats, selection, transfer, None)
+        self.read_limited(formats, selection, source, transfer, None)
     }
 
     fn read_limited(
         &self,
         formats: &[Atom],
         selection: ClipboardKind,
+        source: ReadSource,
         transfer: &mut ClipboardTransfer,
         payload_limit: Option<usize>,
     ) -> Result<ClipboardData> {
-        // if we are the current owner, we can get the current clipboard ourselves
-        if self.is_owner(selection)? {
-            if let Some(limit) = payload_limit {
-                let selection = self.selection_of(selection);
-                let text = selection.explicit_text.read();
-                let text = text.as_ref().ok_or(Error::ContentNotAvailable)?;
-                transfer.limit_bytes(limit);
-                transfer.receive(text.len()).map_err(Error::Transfer)?;
-                return Ok(ClipboardData {
-                    bytes: text.as_bytes().to_vec(),
-                    format: self.atoms.UTF8_STRING,
-                });
-            }
-            let data = self.selection_of(selection).data.read();
-            if let Some(data_list) = &*data {
-                for format in formats {
-                    if let Some(data) = data_list.iter().find(|data| data.format == *format) {
-                        return Ok(data.clone());
-                    }
+        match source {
+            ReadSource::Retained => self.read_retained(formats, selection, transfer, payload_limit),
+            ReadSource::Owner => self.read_from_owner(formats, selection, transfer, payload_limit),
+        }
+    }
+
+    /// Answers from the contents this client retains, without contacting another client.
+    fn read_retained(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        transfer: &mut ClipboardTransfer,
+        payload_limit: Option<usize>,
+    ) -> Result<ClipboardData> {
+        if let Some(limit) = payload_limit {
+            let selection = self.selection_of(selection);
+            let text = selection.explicit_text.read();
+            let text = text.as_ref().ok_or(Error::ContentNotAvailable)?;
+            transfer.limit_bytes(limit);
+            transfer.receive(text.len()).map_err(Error::Transfer)?;
+            return Ok(ClipboardData {
+                bytes: text.as_bytes().to_vec(),
+                format: self.atoms.UTF8_STRING,
+            });
+        }
+        let data = self.selection_of(selection).data.read();
+        if let Some(data_list) = &*data {
+            for format in formats {
+                if let Some(data) = data_list.iter().find(|data| data.format == *format) {
+                    return Ok(data.clone());
                 }
             }
-            return Err(Error::ContentNotAvailable);
         }
+        Err(Error::ContentNotAvailable)
+    }
+
+    /// Transfers the selection from its current owner, which may take until the deadline.
+    fn read_from_owner(
+        &self,
+        formats: &[Atom],
+        selection: ClipboardKind,
+        transfer: &mut ClipboardTransfer,
+        payload_limit: Option<usize>,
+    ) -> Result<ClipboardData> {
         let reader = XContext::new()?;
 
         let highest_precedence_format =
@@ -1068,54 +1100,81 @@ impl Clipboard {
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
         self.inner.get_any(
             selection,
+            self.read_source(selection),
             &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
         )
     }
 
-    /// Prepares an item read. A selection this client owns answers at once; an external
-    /// transfer may run on another thread.
+    /// Prepares an item read. A selection this client owns answers at once; a transfer from
+    /// another owner runs on another thread.
     pub(crate) fn prepare_read(
         &self,
         selection: ClipboardKind,
     ) -> PreparedRead<std::result::Result<Option<ClipboardItem>, ClipboardReadError>> {
-        let mut transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
-        if self.is_owner(selection) {
-            return PreparedRead::Ready(read_result(self.inner.get_any(selection, &mut transfer)));
-        }
-        let inner = Arc::clone(&self.inner);
-        PreparedRead::transfer(move || read_result(inner.get_any(selection, &mut transfer)))
+        self.prepare_read_from(self.read_source(selection), selection)
     }
 
-    /// Prepares a bounded exact text read; the transfer may run on another thread.
+    fn prepare_read_from(
+        &self,
+        source: ReadSource,
+        selection: ClipboardKind,
+    ) -> PreparedRead<std::result::Result<Option<ClipboardItem>, ClipboardReadError>> {
+        let mut transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        self.prepare(source, move |inner, source| {
+            read_result(inner.get_any(selection, source, &mut transfer))
+        })
+    }
+
+    /// Prepares a bounded exact text read; a transfer from another owner runs on another
+    /// thread.
     pub(crate) fn prepare_text_read(
         &self,
         selection: ClipboardKind,
         max_bytes: usize,
     ) -> PreparedRead<std::result::Result<Option<String>, ClipboardReadError>> {
-        self.prepare_text_read_within(
+        self.prepare_text_read_from(
+            self.read_source(selection),
             selection,
             max_bytes,
             ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
         )
     }
 
-    fn prepare_text_read_within(
+    fn prepare_text_read_from(
         &self,
+        source: ReadSource,
         selection: ClipboardKind,
         max_bytes: usize,
         mut transfer: ClipboardTransfer,
     ) -> PreparedRead<std::result::Result<Option<String>, ClipboardReadError>> {
-        if self.is_owner(selection) {
-            return PreparedRead::Ready(read_result(self.inner.get_text(
-                selection,
-                max_bytes,
-                &mut transfer,
-            )));
-        }
-        let inner = Arc::clone(&self.inner);
-        PreparedRead::transfer(move || {
-            read_result(inner.get_text(selection, max_bytes, &mut transfer))
+        self.prepare(source, move |inner, source| {
+            read_result(inner.get_text(selection, source, max_bytes, &mut transfer))
         })
+    }
+
+    /// Answers retained contents at once and moves a transfer to another thread. The source is
+    /// fixed before this call, so another client claiming the selection afterwards cannot
+    /// start a transfer on the preparing thread.
+    fn prepare<T: Send + 'static>(
+        &self,
+        source: ReadSource,
+        read: impl FnOnce(&Inner, ReadSource) -> T + Send + 'static,
+    ) -> PreparedRead<T> {
+        match source {
+            ReadSource::Retained => PreparedRead::Ready(read(&self.inner, source)),
+            ReadSource::Owner => {
+                let inner = Arc::clone(&self.inner);
+                PreparedRead::transfer(move || read(&inner, source))
+            }
+        }
+    }
+
+    fn read_source(&self, selection: ClipboardKind) -> ReadSource {
+        if self.is_owner(selection) {
+            ReadSource::Retained
+        } else {
+            ReadSource::Owner
+        }
     }
 
     pub fn is_owner(&self, selection: ClipboardKind) -> bool {
@@ -1141,6 +1200,7 @@ impl Inner {
     fn get_any(
         &self,
         selection: ClipboardKind,
+        source: ReadSource,
         transfer: &mut ClipboardTransfer,
     ) -> Result<ClipboardItem> {
         let atoms = &self.atoms;
@@ -1156,7 +1216,7 @@ impl Inner {
         format_atoms.extend_from_slice(&self.text_format_atoms());
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
 
-        let mut result = self.read(&format_atoms, selection, transfer)?;
+        let mut result = self.read(&format_atoms, selection, source, transfer)?;
 
         log::trace!(
             "read clipboard as format {:?}",
@@ -1166,7 +1226,7 @@ impl Inner {
         if file_list_format_atoms.contains(&result.format) {
             if let Some(paths) = self.file_paths(&result) {
                 let text = self
-                    .read(&self.text_format_atoms(), selection, transfer)
+                    .read(&self.text_format_atoms(), selection, source, transfer)
                     .and_then(|data| self.decode_text(data))
                     .ok();
                 return Ok(file_list_item(paths, text));
@@ -1175,6 +1235,7 @@ impl Inner {
             result = self.read(
                 &format_atoms[file_list_format_atoms.len()..],
                 selection,
+                source,
                 transfer,
             )?;
         }
@@ -1198,6 +1259,7 @@ impl Inner {
     fn get_text(
         &self,
         selection: ClipboardKind,
+        source: ReadSource,
         max_bytes: usize,
         transfer: &mut ClipboardTransfer,
     ) -> Result<String> {
@@ -1209,7 +1271,7 @@ impl Inner {
             atoms.UTF8_MIME_1,
             atoms.TEXT_MIME_UNKNOWN,
         ];
-        let data = self.read_limited(&formats, selection, transfer, Some(max_bytes))?;
+        let data = self.read_limited(&formats, selection, source, transfer, Some(max_bytes))?;
         String::from_utf8(data.bytes).map_err(|_| Error::ConversionFailure)
     }
 
@@ -1865,6 +1927,7 @@ mod tests {
         inner.read(
             &[inner.atoms.UTF8_STRING],
             ClipboardKind::Clipboard,
+            ReadSource::Owner,
             &mut ClipboardTransfer::new(timeout),
         )
     }
@@ -1910,6 +1973,56 @@ mod tests {
             Err(Error::Transfer(TransferError::TimedOut))
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn owned_reads_never_transfer_after_another_client_claims_the_selection() {
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
+        let delay = Duration::from_millis(300);
+        for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
+            clipboard
+                .set_item(
+                    &ClipboardItem::new_string("retained".into()),
+                    selection,
+                    WaitConfig::None,
+                )
+                .unwrap();
+            let source = clipboard.read_source(selection);
+            assert_eq!(source, ReadSource::Retained);
+
+            // Another client claims the selection after the ownership check.
+            let owner = Owner::answering_after(
+                selection,
+                Offer::TextOnly {
+                    files: false,
+                    image: false,
+                    text: Some(b"external".to_vec()),
+                },
+                delay,
+            );
+            let started = Instant::now();
+            let text = clipboard.prepare_text_read_from(
+                source,
+                selection,
+                1024,
+                ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
+            );
+            let item = clipboard.prepare_read_from(source, selection);
+            assert!(started.elapsed() < delay, "preparing a read must not wait");
+            let (PreparedRead::Ready(text), PreparedRead::Ready(item)) = (text, item) else {
+                panic!("a read prepared for an owned selection must answer at once");
+            };
+            assert_eq!(text, Ok(Some("retained".to_owned())));
+            assert_eq!(
+                item.map(|item| item.and_then(|item| item.text())),
+                Ok(Some("retained".to_owned()))
+            );
+            assert!(owner.requests.lock().is_empty());
+        }
     }
 
     /// Completes a prepared read on the calling thread.
@@ -1985,7 +2098,8 @@ mod tests {
         };
         let _owner = Owner::new(ClipboardKind::Clipboard, Offer::Trickle);
         let started = Instant::now();
-        let read = clipboard.prepare_text_read_within(
+        let read = clipboard.prepare_text_read_from(
+            ReadSource::Owner,
             ClipboardKind::Clipboard,
             MAX_CLIPBOARD_BYTES,
             ClipboardTransfer::new(Duration::from_millis(100)),
