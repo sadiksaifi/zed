@@ -626,6 +626,7 @@ impl X11Client {
         loop {
             let mut events = Vec::new();
             let mut windows_to_refresh = HashSet::new();
+            let mut configured_windows = HashSet::new();
 
             // event handlers for new keyboard / remapping refresh the state without using event
             // details, this deduplicates them.
@@ -637,6 +638,10 @@ impl X11Client {
                         match event {
                             Event::Expose(expose_event) => {
                                 windows_to_refresh.insert(expose_event.window);
+                            }
+                            Event::ConfigureNotify(configure_event) => {
+                                configured_windows.insert(configure_event.window);
+                                events.push(event);
                             }
                             Event::KeyPress(_) | Event::KeyRelease(_) => {
                                 // Keys must be translated with the keymap they were typed with.
@@ -740,6 +745,29 @@ impl X11Client {
                         force_render: false,
                     });
                 }
+            }
+
+            // A resized window presents a frame at its new size before the client waits for
+            // the next event, so the window manager shows no stretched or stale frame, and a
+            // sync request completes as soon as that frame is drawn.
+            for x_window in configured_windows {
+                let window = self
+                    .0
+                    .borrow()
+                    .windows
+                    .get(&x_window)
+                    .map(|window| (window.is_mapped, window.window.clone()));
+                let Some((is_mapped, window)) = window else {
+                    continue;
+                };
+                if is_mapped && window.needs_configured_frame() {
+                    window.refresh(RequestFrameOptions {
+                        require_presentation: true,
+                        force_render: false,
+                    });
+                }
+                // A frame that could not be drawn must not leave the window manager waiting.
+                window.complete_sync_request();
             }
         }
         Ok(())
@@ -850,11 +878,7 @@ impl X11Client {
 
                 let mut state = self.0.borrow_mut();
                 if atom == state.atoms._NET_WM_SYNC_REQUEST {
-                    window.state.borrow_mut().last_sync_counter =
-                        Some(x11rb::protocol::sync::Int64 {
-                            lo: arg2,
-                            hi: arg3 as i32,
-                        })
+                    window.state.borrow_mut().sync_request.request(arg2, arg3);
                 }
 
                 if event.type_ == state.atoms.XdndEnter {
@@ -2143,14 +2167,17 @@ impl X11ClientState {
         self.loop_handle
             .insert_source(calloop::timer::Timer::immediate(), {
                 move |mut instant, (), client| {
-                    let (xcb_connection, window) = {
-                        let state = client.0.borrow();
-                        let window = state
-                            .windows
-                            .get(&x_window)
-                            .map(|window_ref| window_ref.window.clone());
-                        (state.xcb_connection.clone(), window)
-                    };
+                    // Events already read from the connection, such as a ConfigureNotify, must
+                    // apply before the frame, or it would present at a size the window no
+                    // longer has.
+                    let xcb_connection = client.0.borrow().xcb_connection.clone();
+                    client.process_x11_events(&xcb_connection).log_err();
+                    let window = client
+                        .0
+                        .borrow()
+                        .windows
+                        .get(&x_window)
+                        .map(|window_ref| window_ref.window.clone());
                     if let Some(window) = &window {
                         window.frame_demand.take_request();
                         window.refresh(RequestFrameOptions {
@@ -2158,7 +2185,6 @@ impl X11ClientState {
                             force_render: false,
                         });
                     }
-                    client.process_x11_events(&xcb_connection).log_err();
 
                     if let Some(window) = window
                         && !window.frame_demand.is_requested()

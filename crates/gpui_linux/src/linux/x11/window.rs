@@ -275,7 +275,9 @@ pub struct X11WindowState {
     x_screen_index: usize,
     visual_id: u32,
     pub(crate) counter_id: sync::Counter,
-    pub(crate) last_sync_counter: Option<sync::Int64>,
+    pub(crate) sync_request: SyncRequest,
+    /// Whether the window was resized since it last drew a frame.
+    resized_since_draw: bool,
     bounds: Bounds<Pixels>,
     scale_factor: f32,
     renderer: WgpuRenderer,
@@ -302,6 +304,48 @@ pub struct X11WindowState {
     size_limits: SizeLimits,
     is_minimizable: bool,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
+}
+
+/// The client side of the basic `_NET_WM_SYNC_REQUEST` protocol.
+///
+/// While the user resizes a window, the window manager sends a sync request before each
+/// configure and waits until the window's counter reaches the request's value before it shows
+/// and configures the window again. A value is acknowledged only after the window has drawn a
+/// frame at the size that followed its request, so the window manager never shows a size the
+/// window has not drawn, and never waits on a frame the window will not draw.
+#[derive(Debug, Default)]
+pub(crate) struct SyncRequest {
+    /// The latest value whose configure has not arrived yet.
+    requested: Option<i64>,
+    /// The latest value whose configure arrived, to acknowledge once a frame is drawn.
+    configured: Option<i64>,
+}
+
+impl SyncRequest {
+    /// Records a `_NET_WM_SYNC_REQUEST` client message, which carries the low and high 32 bits
+    /// of the counter value in its third and fourth data words.
+    pub(crate) fn request(&mut self, low: u32, high: u32) {
+        self.requested = Some(i64::from(high as i32) << 32 | i64::from(low));
+    }
+
+    /// Records a configure, which completes the latest request.
+    fn configure(&mut self) {
+        if let Some(value) = self.requested.take() {
+            self.configured = Some(value);
+        }
+    }
+
+    /// Takes the value to acknowledge after a frame at the configured size.
+    fn take_configured(&mut self) -> Option<i64> {
+        self.configured.take()
+    }
+}
+
+fn sync_counter_value(value: i64) -> sync::Int64 {
+    sync::Int64 {
+        hi: (value >> 32) as i32,
+        lo: value as u32,
+    }
 }
 
 /// The size limits a window asks the window manager to enforce through WM_NORMAL_HINTS.
@@ -990,7 +1034,8 @@ impl X11WindowState {
                 edge_constraints: None,
                 accesskit_adapter: None,
                 counter_id: sync_request_counter,
-                last_sync_counter: None,
+                sync_request: SyncRequest::default(),
+                resized_since_draw: false,
                 size_limits,
                 is_minimizable: params.is_minimizable,
             })
@@ -1610,6 +1655,32 @@ impl X11WindowStatePtr {
         }
     }
 
+    /// Whether a configure left the window without a frame at its size, or left a sync request
+    /// waiting for one.
+    pub(crate) fn needs_configured_frame(&self) -> bool {
+        let state = self.state.borrow();
+        state.resized_since_draw || state.sync_request.configured.is_some()
+    }
+
+    /// Tells the window manager that the window has drawn the size its latest sync request
+    /// asked for. The client calls this after the frame that follows a configure, and again
+    /// when that frame could not be drawn, so the window manager never waits on a lost frame.
+    pub(crate) fn complete_sync_request(&self) {
+        let (counter, value) = {
+            let mut state = self.state.borrow_mut();
+            let Some(value) = state.sync_request.take_configured() else {
+                return;
+            };
+            (state.counter_id, value)
+        };
+        check_reply(
+            || "X11 sync SetCounter failed.",
+            sync::set_counter(&self.xcb, counter, sync_counter_value(value)),
+        )
+        .log_err();
+        xcb_flush(&self.xcb);
+    }
+
     pub fn set_bounds(&self, bounds: Bounds<i32>) -> anyhow::Result<()> {
         let (is_resize, content_size, scale_factor) = {
             let mut state = self.state.borrow_mut();
@@ -1628,14 +1699,9 @@ impl X11WindowStatePtr {
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
             state.renderer.update_drawable_size(gpu_size);
-            let result = (is_resize, state.content_size(), state.scale_factor);
-            if let Some(value) = state.last_sync_counter.take() {
-                check_reply(
-                    || "X11 sync SetCounter failed.",
-                    sync::set_counter(&self.xcb, state.counter_id, value),
-                )?;
-            }
-            result
+            state.sync_request.configure();
+            state.resized_since_draw |= is_resize;
+            (is_resize, state.content_size(), state.scale_factor)
         };
 
         self.update_a11y_window_bounds();
@@ -2120,12 +2186,17 @@ impl PlatformWindow for X11Window {
         }
 
         inner.renderer.draw(scene);
+        inner.resized_since_draw = false;
 
-        if inner.renderer.needs_redraw() {
+        let needs_redraw = inner.renderer.needs_redraw();
+        if needs_redraw {
             inner.force_render_after_recovery = true;
-            drop(inner);
+        }
+        drop(inner);
+        if needs_redraw {
             self.0.frame_demand.request();
         }
+        self.0.complete_sync_request();
     }
 
     fn schedule_frame(&self) {
@@ -2466,8 +2537,8 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        MaximizeAxes, MaximizeChange, SizeLimits, WmHintPropertyState, net_wm_state_message,
-        startup_notification_timestamp,
+        MaximizeAxes, MaximizeChange, SizeLimits, SyncRequest, WmHintPropertyState,
+        net_wm_state_message, startup_notification_timestamp, sync_counter_value,
     };
     use gpui::{DevicePixels, Size, px, size};
 
@@ -2640,5 +2711,60 @@ mod tests {
         );
         assert_eq!(WmHintPropertyState::Remove as u32, 0);
         assert_eq!(WmHintPropertyState::Toggle as u32, 2);
+    }
+
+    #[test]
+    fn sync_request_waits_for_its_configure() {
+        let mut sync_request = SyncRequest::default();
+        sync_request.request(1, 0);
+        assert_eq!(sync_request.take_configured(), None);
+
+        sync_request.configure();
+        assert_eq!(sync_request.take_configured(), Some(1));
+        assert_eq!(sync_request.take_configured(), None);
+    }
+
+    #[test]
+    fn configure_without_a_sync_request_acknowledges_nothing() {
+        let mut sync_request = SyncRequest::default();
+        sync_request.configure();
+        assert_eq!(sync_request.take_configured(), None);
+
+        sync_request.request(1, 0);
+        sync_request.configure();
+        sync_request.configure();
+        assert_eq!(sync_request.take_configured(), Some(1));
+        assert_eq!(sync_request.take_configured(), None);
+    }
+
+    #[test]
+    fn sync_request_acknowledges_the_latest_configured_value() {
+        let mut sync_request = SyncRequest::default();
+        sync_request.request(1, 0);
+        sync_request.configure();
+        sync_request.request(2, 0);
+        assert_eq!(sync_request.take_configured(), Some(1));
+
+        sync_request.configure();
+        sync_request.request(3, 0);
+        sync_request.configure();
+        assert_eq!(sync_request.take_configured(), Some(3));
+    }
+
+    #[test]
+    fn sync_values_round_trip_through_both_counter_halves() {
+        for (low, high, value) in [
+            (7, 0, 7),
+            (0, 1, 1 << 32),
+            (u32::MAX, 0, i64::from(u32::MAX)),
+            (u32::MAX, u32::MAX, -1),
+        ] {
+            let mut sync_request = SyncRequest::default();
+            sync_request.request(low, high);
+            sync_request.configure();
+            assert_eq!(sync_request.take_configured(), Some(value));
+            let counter = sync_counter_value(value);
+            assert_eq!((counter.lo, counter.hi as u32), (low, high));
+        }
     }
 }
