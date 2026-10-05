@@ -79,6 +79,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): redraw X11 windows at each size during interactive resize`
 - `feat(gpui_linux): blur X11 window backgrounds under KWin`
 - `feat(gpui_linux): report the modifier role of XKB modifier keys`
+- `fix(gpui_linux): clear the modifiers a modifier key press set on its release`
 - `feat(gpui_linux): read clipboards without blocking the main thread`
 - `fix(gpui_linux): answer owned X11 selections from retained contents only`
 - `fix(gpui_linux): request Wayland offers before their transfer runs`

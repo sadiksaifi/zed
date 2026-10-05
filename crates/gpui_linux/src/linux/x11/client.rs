@@ -61,7 +61,7 @@ use crate::linux::{
     LinuxCommon, LinuxKeyboardLayout, X11Window,
     compose::{ComposeKeys, ComposeText, feed_compose},
     modifiers_from_xinput_info,
-    xkb_facts::{modifier_key_changed_event, modifier_key_event, native_key_event},
+    xkb_facts::{HeldModifierKeys, modifier_key_changed_event, native_key_event},
 };
 
 use gpui::{
@@ -239,6 +239,7 @@ pub struct X11ClientState {
     pub(crate) composing: bool,
     pub(crate) pre_key_char_down: Option<Keystroke>,
     pressed_keys: PressedKeys,
+    held_modifier_keys: HeldModifierKeys,
     pub(crate) cursor_handle: cursor::Handle,
     pub(crate) cursor_styles: HashMap<xproto::Window, CursorStyle>,
     pub(crate) cursor_cache: HashMap<CursorStyle, Option<xproto::Cursor>>,
@@ -607,6 +608,7 @@ impl X11Client {
             pre_edit_text: None,
             pre_key_char_down: None,
             pressed_keys: PressedKeys::default(),
+            held_modifier_keys: HeldModifierKeys::default(),
             composing: false,
 
             cursor_handle,
@@ -1048,6 +1050,7 @@ impl X11Client {
                 state.activation_click_window = None;
                 // Keys released after focus moves are reported to the newly focused window.
                 state.pressed_keys.clear();
+                state.held_modifier_keys.clear();
                 if let Some(compose_state) = state.compose_state.as_mut() {
                     compose_state.reset();
                 }
@@ -1121,10 +1124,9 @@ impl X11Client {
             }
             Event::KeymapNotify(event) => {
                 // Ordered after FocusIn or EnterNotify, before subsequent key transitions.
-                self.0
-                    .borrow_mut()
-                    .pressed_keys
-                    .replace_from_keymap(&event.keys);
+                let mut state = self.0.borrow_mut();
+                state.pressed_keys.replace_from_keymap(&event.keys);
+                state.held_modifier_keys.clear();
             }
             Event::KeyPress(event) => {
                 let window = self.get_window(event.event)?;
@@ -1146,8 +1148,7 @@ impl X11Client {
                     if is_held {
                         return Some(());
                     }
-                    let native =
-                        modifier_key_event(&key_event_state, code, true, state.pressed_keys.iter());
+                    let native = state.held_modifier_keys.press(&key_event_state, code);
                     drop(state);
                     window.handle_native_key_input(
                         PlatformInput::ModifiersChanged(modifier_key_changed_event(&native)),
@@ -1209,11 +1210,11 @@ impl X11Client {
                 let keysym = key_event_state.key_get_one_sym(code);
 
                 if keysym.is_modifier_key() {
-                    let native = modifier_key_event(
+                    let client = &mut *state;
+                    let native = client.held_modifier_keys.release(
                         &key_event_state,
                         code,
-                        false,
-                        state.pressed_keys.iter(),
+                        client.pressed_keys.iter(),
                     );
                     drop(state);
                     window.handle_native_key_input(
