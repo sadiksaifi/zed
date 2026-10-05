@@ -86,6 +86,7 @@ use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
     SCROLL_LINES, capslock_from_xkb,
     clipboard_formats::uri_list,
+    clipboard_transfer::PreparedRead,
     compose::{ComposeKeys, ComposeText, feed_compose},
     cursor_style_to_icon_names, get_xkb_compose_state, is_within_click_distance,
     keystroke_from_xkb, modifiers_from_xkb, new_xkb_context, open_uri_internal,
@@ -106,8 +107,8 @@ use gpui::{
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, Pixels, PlatformDisplay, PlatformInput,
     PlatformKeyboardLayout, PlatformWindow, Point, ScrollDelta, ScrollWheelEvent, SharedString,
-    Size, TouchPhase, WindowBackgroundSupport, WindowButtonLayout, WindowKind, WindowParams, point,
-    profiler, px, size,
+    Size, Task, TouchPhase, WindowBackgroundSupport, WindowButtonLayout, WindowKind, WindowParams,
+    point, profiler, px, size,
 };
 use gpui_wgpu::{CompositorGpuHint, GpuContext};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
@@ -1091,6 +1092,41 @@ impl WaylandClient {
     }
 }
 
+impl WaylandClient {
+    /// Reads a selection's item off the main thread, then retains an external result for
+    /// later reads while its offer is still the selection.
+    fn read_selection_item(
+        &self,
+        selection: gpui::ClipboardSelection,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        if selection == gpui::ClipboardSelection::Primary && state.primary_selection.is_none() {
+            return Task::ready(Err(gpui::ClipboardReadError::Unavailable));
+        }
+        let (offer, read) = (
+            state.clipboard.offer_id(selection),
+            state.clipboard.prepare_read(selection),
+        );
+        let (PreparedRead::Transfer(_), Some(offer)) = (&read, offer) else {
+            return read.spawn(&state.common.background_executor);
+        };
+        let transfer = read.spawn(&state.common.background_executor);
+        let client = Rc::downgrade(&self.0);
+        state.common.foreground_executor.spawn(async move {
+            let item = transfer.await;
+            if let Ok(Some(item)) = &item
+                && let Some(client) = client.upgrade()
+            {
+                client
+                    .borrow_mut()
+                    .clipboard
+                    .retain_read(selection, &offer, item.clone());
+            }
+            item
+        })
+    }
+}
+
 impl LinuxClient for WaylandClient {
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
         Box::new(self.0.borrow().keyboard_layout.clone())
@@ -1377,12 +1413,15 @@ impl LinuxClient for WaylandClient {
         &self,
         selection: gpui::ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> Task<Result<Option<String>, gpui::ClipboardReadError>> {
         let state = self.0.borrow();
         if selection == gpui::ClipboardSelection::Primary && state.primary_selection.is_none() {
-            return None;
+            return Task::ready(Err(gpui::ClipboardReadError::Unavailable));
         }
-        state.clipboard.read_text(selection, max_bytes)
+        state
+            .clipboard
+            .prepare_text_read(selection, max_bytes)
+            .spawn(&state.common.background_executor)
     }
 
     fn read_from_primary(&self) -> Option<gpui::ClipboardItem> {
@@ -1391,6 +1430,18 @@ impl LinuxClient for WaylandClient {
 
     fn read_from_clipboard(&self) -> Option<gpui::ClipboardItem> {
         self.0.borrow_mut().clipboard.read()
+    }
+
+    fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        self.read_selection_item(gpui::ClipboardSelection::Primary)
+    }
+
+    fn read_from_clipboard_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        self.read_selection_item(gpui::ClipboardSelection::Clipboard)
     }
 
     fn active_window(&self) -> Option<AnyWindowHandle> {

@@ -33,11 +33,11 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 use crate::linux::TitlebarDoubleClickAction;
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
-    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
-    DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, RunnableVariant, Task, ThermalState, WindowAppearance,
-    WindowBackgroundSupport, WindowButtonLayout, WindowParams,
+    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ClipboardReadError,
+    CursorStyle, DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, RunnableVariant, Task, ThermalState,
+    WindowAppearance, WindowBackgroundSupport, WindowButtonLayout, WindowParams,
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use gpui::{Pixels, Point, px};
@@ -101,8 +101,8 @@ pub(crate) trait LinuxClient {
         &self,
         _selection: gpui::ClipboardSelection,
         _max_bytes: usize,
-    ) -> Option<String> {
-        None
+    ) -> Task<Result<Option<String>, ClipboardReadError>> {
+        Task::ready(Ok(None))
     }
     fn try_write_selection(
         &self,
@@ -115,6 +115,12 @@ pub(crate) trait LinuxClient {
     fn write_to_clipboard(&self, item: ClipboardItem);
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        Task::ready(Ok(self.read_from_primary()))
+    }
+    fn read_from_clipboard_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        Task::ready(Ok(self.read_from_clipboard()))
+    }
     fn active_window(&self) -> Option<AnyWindowHandle>;
     fn window_stack(&self) -> Option<Vec<AnyWindowHandle>>;
     fn run(&self);
@@ -832,7 +838,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
         &self,
         selection: gpui::ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> Task<Result<Option<String>, ClipboardReadError>> {
         self.inner.read_selection_text(selection, max_bytes)
     }
 
@@ -858,6 +864,14 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.inner.read_from_clipboard()
+    }
+
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.inner.read_from_primary_async()
+    }
+
+    fn read_from_clipboard_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.inner.read_from_clipboard_async()
     }
 
     fn add_recent_document(&self, _path: &Path) {}

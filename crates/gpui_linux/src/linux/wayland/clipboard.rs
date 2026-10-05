@@ -13,7 +13,7 @@ use calloop::{
 };
 use filedescriptor::Pipe;
 use strum::IntoEnumIterator;
-use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
+use wayland_client::{Connection, Proxy, backend::ObjectId, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::linux::{
@@ -22,10 +22,13 @@ use crate::linux::{
         ClipboardOffer, GNOME_COPIED_FILES_MIME_TYPE, HTML_MIME_TYPE, URI_LIST_MIME_TYPE,
         file_list_item, parse_gnome_copied_files, parse_uri_list,
     },
-    clipboard_transfer::{CLIPBOARD_READ_TIMEOUT, ClipboardTransfer},
+    clipboard_transfer::{CLIPBOARD_READ_TIMEOUT, ClipboardTransfer, PreparedRead, TransferError},
     platform::read_fd_with_budget,
 };
-use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
+use gpui::{
+    ClipboardEntry, ClipboardItem, ClipboardReadError, ClipboardSelection, ExternalPaths, Image,
+    ImageFormat, hash,
+};
 
 /// Text mime types offered to and accepted from other programs, in preference order.
 ///
@@ -138,24 +141,25 @@ impl<T: ReceiveData> DataOffer<T> {
         connection: &Connection,
         mime_type: &str,
         transfer: &mut ClipboardTransfer,
-    ) -> Option<Vec<u8>> {
-        transfer.remaining_time().ok()?;
-        let pipe = Pipe::new().ok()?;
-        self.inner.receive_data(mime_type.to_string(), unsafe {
-            BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
-        });
-        let fd = pipe.read;
-        drop(pipe.write);
-
-        connection.flush().ok()?;
-
-        match read_fd_with_budget(fd, transfer) {
-            Ok(bytes) => Some(bytes),
-            Err(_) => {
-                log::error!("clipboard transfer failed");
-                None
+    ) -> Result<Vec<u8>, ClipboardReadError> {
+        transfer.remaining_time()?;
+        let mut receive = || -> anyhow::Result<Vec<u8>> {
+            let pipe = Pipe::new()?;
+            self.inner.receive_data(mime_type.to_string(), unsafe {
+                BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
+            });
+            let fd = pipe.read;
+            drop(pipe.write);
+            connection.flush()?;
+            read_fd_with_budget(fd, transfer)
+        };
+        receive().map_err(|error| {
+            log::error!("clipboard transfer failed");
+            match error.downcast::<TransferError>() {
+                Ok(error) => error.into(),
+                Err(_) => ClipboardReadError::Unavailable,
             }
-        }
+        })
     }
 
     /// The most preferred text mime type this offer contains.
@@ -169,77 +173,137 @@ impl<T: ReceiveData> DataOffer<T> {
         &self,
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, ClipboardReadError> {
         // Ordinary Paste retains its existing line-ending normalization.
         self.read_string_exact(connection, transfer)
-            .map(|text| text.replace("\r\n", "\n"))
+            .map(|text| text.map(|text| text.replace("\r\n", "\n")))
     }
 
     fn read_string_exact(
         &self,
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
-    ) -> Option<String> {
-        let mime_type = self.text_mime_type()?;
+    ) -> Result<Option<String>, ClipboardReadError> {
+        let Some(mime_type) = self.text_mime_type() else {
+            return Ok(None);
+        };
         let bytes = self.read_bytes(connection, mime_type, transfer)?;
-        String::from_utf8(bytes).ok()
-    }
-
-    fn read_text(&self, connection: &Connection, max_bytes: usize) -> Option<String> {
-        let mut transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
-        transfer.limit_bytes(max_bytes);
-        self.read_string_exact(connection, &mut transfer)
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| ClipboardReadError::UnsupportedContent)
     }
 
     fn read_file_paths(
         &self,
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
-    ) -> Option<ExternalPaths> {
-        if self.has_mime_type(URI_LIST_MIME_TYPE) {
-            let bytes = self.read_bytes(connection, URI_LIST_MIME_TYPE, transfer)?;
-            parse_uri_list(&bytes)
+    ) -> Result<Option<ExternalPaths>, ClipboardReadError> {
+        Ok(if self.has_mime_type(URI_LIST_MIME_TYPE) {
+            parse_uri_list(&self.read_bytes(connection, URI_LIST_MIME_TYPE, transfer)?)
         } else if self.has_mime_type(GNOME_COPIED_FILES_MIME_TYPE) {
-            let bytes = self.read_bytes(connection, GNOME_COPIED_FILES_MIME_TYPE, transfer)?;
-            parse_gnome_copied_files(&bytes)
+            parse_gnome_copied_files(&self.read_bytes(
+                connection,
+                GNOME_COPIED_FILES_MIME_TYPE,
+                transfer,
+            )?)
         } else {
             None
-        }
+        })
     }
 
-    /// Reads the offer as a file list, then text, then an image.
-    fn read_item(&self, connection: &Connection) -> Option<ClipboardItem> {
-        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
-        if let Some(paths) = self.read_file_paths(connection, transfer) {
-            return Some(file_list_item(
-                paths,
-                self.read_string(connection, transfer),
-            ));
+    /// Reads the offer as a file list, then text, then an image, within one transfer budget.
+    fn read_item(
+        &self,
+        connection: &Connection,
+        transfer: &mut ClipboardTransfer,
+    ) -> Result<Option<ClipboardItem>, ClipboardReadError> {
+        if let Some(paths) = self.read_file_paths(connection, transfer)? {
+            // The file list stands without its text alternate.
+            let text = self.read_string(connection, transfer).ok().flatten();
+            return Ok(Some(file_list_item(paths, text)));
         }
-        self.read_string(connection, transfer)
-            .map(ClipboardItem::new_string)
-            .or_else(|| self.read_image(connection, transfer))
+        match self.read_string(connection, transfer) {
+            Ok(Some(text)) => Ok(Some(ClipboardItem::new_string(text))),
+            Ok(None) | Err(ClipboardReadError::UnsupportedContent) => {
+                self.read_image(connection, transfer)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn read_image(
         &self,
         connection: &Connection,
         transfer: &mut ClipboardTransfer,
-    ) -> Option<ClipboardItem> {
-        for format in ImageFormat::iter() {
-            let mime_type = format.mime_type();
-            if !self.has_mime_type(mime_type) {
-                continue;
-            }
+    ) -> Result<Option<ClipboardItem>, ClipboardReadError> {
+        let Some(format) =
+            ImageFormat::iter().find(|format| self.has_mime_type(format.mime_type()))
+        else {
+            return Ok(None);
+        };
+        let bytes = self.read_bytes(connection, format.mime_type(), transfer)?;
+        let id = hash(&bytes);
+        Ok(Some(ClipboardItem {
+            entries: vec![ClipboardEntry::Image(Image { format, bytes, id })],
+        }))
+    }
+}
 
-            if let Some(bytes) = self.read_bytes(connection, mime_type, transfer) {
-                let id = hash(&bytes);
-                return Some(ClipboardItem {
-                    entries: vec![ClipboardEntry::Image(Image { format, bytes, id })],
-                });
-            }
+enum SelectionReadRef<'a> {
+    Clipboard(SelectionRead<'a, WlDataOffer>),
+    Primary(SelectionRead<'a, ZwpPrimarySelectionOfferV1>),
+}
+
+/// The selection a read targets, with the offer and contents it is answered from.
+struct SelectionRead<'a, T: ReceiveData> {
+    offer: Option<&'a DataOffer<T>>,
+    owned: Option<&'a OwnedSelection>,
+    cached: Option<&'a ClipboardItem>,
+}
+
+impl<T: ReceiveData + Proxy + Send + 'static> SelectionRead<'_, T> {
+    fn prepare_item(
+        self,
+        self_mime: &str,
+        connection: &Connection,
+        transfer: ClipboardTransfer,
+    ) -> PreparedRead<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        let Some(offer) = self.offer else {
+            return PreparedRead::Ready(Ok(None));
+        };
+        if let Some(cached) = self.cached {
+            return PreparedRead::Ready(Ok(Some(cached.clone())));
         }
-        None
+        if offer.has_mime_type(self_mime) {
+            return PreparedRead::Ready(Ok(self.owned.map(|owned| owned.item.clone())));
+        }
+        let (offer, connection, mut transfer) = (offer.clone(), connection.clone(), transfer);
+        PreparedRead::transfer(move || offer.read_item(&connection, &mut transfer))
+    }
+
+    fn prepare_text(
+        self,
+        self_mime: &str,
+        connection: &Connection,
+        max_bytes: usize,
+        mut transfer: ClipboardTransfer,
+    ) -> PreparedRead<Result<Option<String>, ClipboardReadError>> {
+        let Some(offer) = self.offer else {
+            return PreparedRead::Ready(Ok(None));
+        };
+        if offer.has_mime_type(self_mime) {
+            return PreparedRead::Ready(
+                self.owned
+                    .map_or(Ok(None), |owned| owned.item.bounded_text(max_bytes)),
+            );
+        }
+        transfer.limit_bytes(max_bytes);
+        let (offer, connection) = (offer.clone(), connection.clone());
+        PreparedRead::transfer(move || offer.read_string_exact(&connection, &mut transfer))
+    }
+
+    fn offer_id(&self) -> Option<ObjectId> {
+        self.offer.map(|offer| offer.inner.id())
     }
 }
 
@@ -313,76 +377,122 @@ impl Clipboard {
         }
     }
 
+    fn selection<'a>(&'a self, selection: ClipboardSelection) -> SelectionReadRef<'a> {
+        match selection {
+            ClipboardSelection::Clipboard => SelectionReadRef::Clipboard(SelectionRead {
+                offer: self.current_offer.as_ref(),
+                owned: self.contents.as_ref(),
+                cached: self.cached_read.as_ref(),
+            }),
+            ClipboardSelection::Primary => SelectionReadRef::Primary(SelectionRead {
+                offer: self.current_primary_offer.as_ref(),
+                owned: self.primary_contents.as_ref(),
+                cached: self.cached_primary_read.as_ref(),
+            }),
+        }
+    }
+
     pub fn read(&mut self) -> Option<ClipboardItem> {
-        let offer = self.current_offer.as_ref()?;
-        if let Some(cached) = self.cached_read.clone() {
-            return Some(cached);
-        }
-
-        if offer.has_mime_type(&self.self_mime) {
-            return self.contents.as_ref().map(|contents| contents.item.clone());
-        }
-
-        let item = offer.read_item(&self.connection)?;
-
-        self.cached_read = Some(item.clone());
-        Some(item)
+        self.read_blocking(ClipboardSelection::Clipboard)
     }
 
     pub fn read_primary(&mut self) -> Option<ClipboardItem> {
-        let offer = self.current_primary_offer.as_ref()?;
-        if let Some(cached) = self.cached_primary_read.clone() {
-            return Some(cached);
-        }
-
-        if offer.has_mime_type(&self.self_mime) {
-            return self
-                .primary_contents
-                .as_ref()
-                .map(|contents| contents.item.clone());
-        }
-
-        let item = offer.read_item(&self.connection)?;
-
-        self.cached_primary_read = Some(item.clone());
-        Some(item)
+        self.read_blocking(ClipboardSelection::Primary)
     }
 
-    pub fn read_text(
+    fn read_blocking(&mut self, selection: ClipboardSelection) -> Option<ClipboardItem> {
+        let offer = self.offer_id(selection)?;
+        match self.prepare_read(selection) {
+            PreparedRead::Ready(item) => item.ok().flatten(),
+            PreparedRead::Transfer(transfer) => {
+                let item = transfer().ok().flatten()?;
+                self.retain_read(selection, &offer, item.clone());
+                Some(item)
+            }
+        }
+    }
+
+    /// Prepares a read of the selection's item; an external transfer may run on another thread.
+    pub fn prepare_read(
         &self,
-        selection: gpui::ClipboardSelection,
+        selection: ClipboardSelection,
+    ) -> PreparedRead<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        let transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        match self.selection(selection) {
+            SelectionReadRef::Clipboard(read) => {
+                read.prepare_item(&self.self_mime, &self.connection, transfer)
+            }
+            SelectionReadRef::Primary(read) => {
+                read.prepare_item(&self.self_mime, &self.connection, transfer)
+            }
+        }
+    }
+
+    /// Prepares a bounded exact text read; an external transfer may run on another thread.
+    pub fn prepare_text_read(
+        &self,
+        selection: ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> PreparedRead<Result<Option<String>, ClipboardReadError>> {
+        self.prepare_text_read_within(
+            selection,
+            max_bytes,
+            ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
+        )
+    }
+
+    fn prepare_text_read_within(
+        &self,
+        selection: ClipboardSelection,
+        max_bytes: usize,
+        transfer: ClipboardTransfer,
+    ) -> PreparedRead<Result<Option<String>, ClipboardReadError>> {
         let max_bytes = max_bytes.min(crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES);
+        match self.selection(selection) {
+            SelectionReadRef::Clipboard(read) => {
+                read.prepare_text(&self.self_mime, &self.connection, max_bytes, transfer)
+            }
+            SelectionReadRef::Primary(read) => {
+                read.prepare_text(&self.self_mime, &self.connection, max_bytes, transfer)
+            }
+        }
+    }
+
+    /// Identifies the external offer a prepared read targets.
+    pub fn offer_id(&self, selection: ClipboardSelection) -> Option<ObjectId> {
+        match self.selection(selection) {
+            SelectionReadRef::Clipboard(read) => read.offer_id(),
+            SelectionReadRef::Primary(read) => read.offer_id(),
+        }
+    }
+
+    /// Retains an external item for later reads while its offer is still the selection.
+    pub fn retain_read(
+        &mut self,
+        selection: ClipboardSelection,
+        offer: &ObjectId,
+        item: ClipboardItem,
+    ) {
+        if self.offer_id(selection).as_ref() != Some(offer) {
+            return;
+        }
         match selection {
-            gpui::ClipboardSelection::Clipboard => {
-                let offer = self.current_offer.as_ref()?;
-                if offer.has_mime_type(&self.self_mime) {
-                    return self.contents.as_ref()?.item.bounded_text(max_bytes);
-                }
-                offer.read_text(&self.connection, max_bytes)
-            }
-            gpui::ClipboardSelection::Primary => {
-                let offer = self.current_primary_offer.as_ref()?;
-                if offer.has_mime_type(&self.self_mime) {
-                    return self.primary_contents.as_ref()?.item.bounded_text(max_bytes);
-                }
-                offer.read_text(&self.connection, max_bytes)
-            }
+            ClipboardSelection::Clipboard => self.cached_read = Some(item),
+            ClipboardSelection::Primary => self.cached_primary_read = Some(item),
         }
     }
 
     pub fn claim(
         &mut self,
-        selection: gpui::ClipboardSelection,
+        selection: ClipboardSelection,
         item: ClipboardItem,
         serial: Option<super::serial::SelectionSerial>,
     ) -> Result<(Vec<&'static str>, super::serial::SelectionSerial), gpui::ClipboardWriteError>
     {
         let serial = serial.ok_or(gpui::ClipboardWriteError::Unavailable)?;
         let mime_types = match selection {
-            gpui::ClipboardSelection::Clipboard => self.set(item),
-            gpui::ClipboardSelection::Primary => self.set_primary(item),
+            ClipboardSelection::Clipboard => self.set(item),
+            ClipboardSelection::Primary => self.set_primary(item),
         };
         Ok((mime_types, serial))
     }

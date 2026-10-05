@@ -706,7 +706,7 @@ impl Platform for TestPlatform {
         &self,
         selection: crate::ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> Task<Result<Option<String>, crate::ClipboardReadError>> {
         let item = match selection {
             crate::ClipboardSelection::Clipboard => self.read_from_clipboard(),
             crate::ClipboardSelection::Primary => {
@@ -719,8 +719,8 @@ impl Platform for TestPlatform {
                     None
                 }
             }
-        }?;
-        item.bounded_text(max_bytes)
+        };
+        Task::ready(item.map_or(Ok(None), |item| item.bounded_text(max_bytes)))
     }
 
     fn try_write_selection(

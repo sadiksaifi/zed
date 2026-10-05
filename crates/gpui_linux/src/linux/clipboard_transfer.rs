@@ -21,6 +21,37 @@ impl std::fmt::Display for TransferError {
 
 impl std::error::Error for TransferError {}
 
+impl From<TransferError> for gpui::ClipboardReadError {
+    fn from(error: TransferError) -> Self {
+        match error {
+            TransferError::TimedOut => Self::TimedOut,
+            TransferError::TooLarge => Self::TooLarge,
+        }
+    }
+}
+
+/// A clipboard read prepared on the main thread. A selection that GPUI owns answers at once; an
+/// external transfer runs on the background executor so a slow owner cannot block the main
+/// thread. The transfer's deadline starts when the read is prepared.
+pub(crate) enum PreparedRead<T> {
+    Ready(T),
+    Transfer(Box<dyn FnOnce() -> T + Send>),
+}
+
+impl<T: Send + 'static> PreparedRead<T> {
+    pub fn transfer(transfer: impl FnOnce() -> T + Send + 'static) -> Self {
+        Self::Transfer(Box::new(transfer))
+    }
+
+    /// Dropping the task discards the result; an external transfer still ends by its deadline.
+    pub fn spawn(self, executor: &gpui::BackgroundExecutor) -> gpui::Task<T> {
+        match self {
+            Self::Ready(value) => gpui::Task::ready(value),
+            Self::Transfer(transfer) => executor.spawn(async move { transfer() }),
+        }
+    }
+}
+
 pub(super) struct ClipboardTransfer {
     deadline: Instant,
     remaining_bytes: usize,

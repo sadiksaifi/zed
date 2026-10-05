@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 use wayland_client::protocol::{
     wl_data_device as client_device, wl_data_device_manager as client_manager, wl_registry,
     wl_seat as client_seat,
@@ -22,16 +23,33 @@ use wayland_protocols::wp::primary_selection::zv1::server::{
 use wayland_server::protocol::{wl_data_device, wl_data_device_manager, wl_data_offer, wl_seat};
 use wayland_server::{Client, DataInit, Dispatch, Display, DisplayHandle, GlobalDispatch, New};
 
+/// When a protocol owner writes its contents after a receive request.
+#[derive(Clone, Copy)]
+enum Answer {
+    Now,
+    After(Duration),
+    Never,
+}
+
 struct OwnerState {
     formats: Vec<String>,
     bytes: Vec<u8>,
+    answer: Answer,
     requests: Arc<Mutex<Vec<String>>>,
+    /// Kept open without data until the owner stops.
+    stalled: Vec<OwnedFd>,
 }
 impl OwnerState {
-    fn send(&self, mime: String, fd: OwnedFd) {
+    fn send(&mut self, mime: String, fd: OwnedFd) {
         self.requests.lock().unwrap().push(mime);
+        let delay = match self.answer {
+            Answer::Now => Duration::ZERO,
+            Answer::After(delay) => delay,
+            Answer::Never => return self.stalled.push(fd),
+        };
         let bytes = self.bytes.clone();
         std::thread::spawn(move || {
+            std::thread::sleep(delay);
             let _ = File::from(fd).write_all(&bytes);
         });
     }
@@ -256,6 +274,10 @@ struct Owner {
 }
 impl Owner {
     fn new(formats: Vec<&str>, bytes: Vec<u8>) -> Self {
+        Self::answering(formats, bytes, Answer::Now)
+    }
+
+    fn answering(formats: Vec<&str>, bytes: Vec<u8>, answer: Answer) -> Self {
         let (client_socket, server_socket) = UnixStream::pair().unwrap();
         let mut display = Display::<OwnerState>::new().unwrap();
         let mut handle = display.handle();
@@ -276,7 +298,9 @@ impl Owner {
                 let mut state = OwnerState {
                     formats,
                     bytes,
+                    answer,
                     requests,
+                    stalled: Vec::new(),
                 };
                 while !stopped.load(Ordering::Relaxed) {
                     display.dispatch_clients(&mut state).unwrap();
@@ -320,34 +344,44 @@ impl Drop for Owner {
 #[test]
 fn external_text_only_protocol_owners_preserve_utf8_and_bounds() {
     for (formats, bytes, expected) in [
-        (vec!["image/png"], b"image".to_vec(), None),
+        (vec!["image/png"], b"image".to_vec(), Ok(None)),
         (
             vec![URI_LIST_MIME_TYPE],
             b"file:///tmp/fixture\r\n".to_vec(),
-            None,
+            Ok(None),
         ),
         (
             vec![URI_LIST_MIME_TYPE, "image/png", "text/plain"],
             b"a\r\nb".to_vec(),
-            Some("a\r\nb".to_owned()),
+            Ok(Some("a\r\nb".to_owned())),
         ),
-        (vec!["text/plain"], vec![0xff], None),
-        (vec!["text/plain"], vec![b'x'; 1024], Some("x".repeat(1024))),
-        (vec!["text/plain"], vec![b'x'; 1025], None),
+        (
+            vec!["text/plain"],
+            vec![0xff],
+            Err(ClipboardReadError::UnsupportedContent),
+        ),
+        (
+            vec!["text/plain"],
+            vec![b'x'; 1024],
+            Ok(Some("x".repeat(1024))),
+        ),
+        (
+            vec!["text/plain"],
+            vec![b'x'; 1025],
+            Err(ClipboardReadError::TooLarge),
+        ),
     ] {
         let owner = Owner::new(formats, bytes);
         let event_loop = calloop::EventLoop::try_new().unwrap();
         let mut clipboard = Clipboard::new(owner.connection.clone(), event_loop.handle());
         clipboard.set_offer(owner.reader.clipboard.clone());
         clipboard.set_primary_offer(owner.reader.primary.clone());
-        assert_eq!(
-            clipboard.read_text(gpui::ClipboardSelection::Clipboard, 1024),
-            expected
-        );
-        assert_eq!(
-            clipboard.read_text(gpui::ClipboardSelection::Primary, 1024),
-            expected
-        );
+        for selection in [ClipboardSelection::Clipboard, ClipboardSelection::Primary] {
+            assert_eq!(
+                finish(clipboard.prepare_text_read(selection, 1024)),
+                expected
+            );
+        }
         assert!(
             owner
                 .requests
@@ -388,6 +422,7 @@ fn selection_claim_without_press_preserves_retained_contents() {
                 .unwrap()
                 .item
                 .bounded_text(1024)
+                .unwrap()
                 .as_deref(),
             Some("clipboard")
         );
@@ -398,6 +433,7 @@ fn selection_claim_without_press_preserves_retained_contents() {
                 .unwrap()
                 .item
                 .bounded_text(1024)
+                .unwrap()
                 .as_deref(),
             Some("primary")
         );
@@ -418,6 +454,7 @@ fn selection_claim_without_press_preserves_retained_contents() {
             .unwrap()
             .item
             .bounded_text(1024)
+            .unwrap()
             .as_deref(),
         Some("claimed")
     );
@@ -437,6 +474,7 @@ fn selection_claim_without_press_preserves_retained_contents() {
             .unwrap()
             .item
             .bounded_text(1024)
+            .unwrap()
             .as_deref(),
         Some("claimed primary")
     );
@@ -459,8 +497,8 @@ fn external_text_only_preserves_crlf_after_ordinary_read() {
         gpui::ClipboardSelection::Primary,
     ] {
         assert_eq!(
-            clipboard.read_text(selection, 1024).as_deref(),
-            Some("a\r\nb")
+            finish(clipboard.prepare_text_read(selection, 1024)),
+            Ok(Some("a\r\nb".to_owned()))
         );
     }
 }
@@ -484,11 +522,14 @@ fn owned_text_only_selections_preserve_bytes_without_path_synthesis() {
             gpui::ClipboardSelection::Primary,
         ] {
             assert_eq!(
-                clipboard.read_text(selection, text.len()).as_deref(),
-                Some(text)
+                finish(clipboard.prepare_text_read(selection, text.len())),
+                Ok(Some(text.to_owned()))
             );
             if !text.is_empty() {
-                assert_eq!(clipboard.read_text(selection, text.len() - 1), None);
+                assert_eq!(
+                    finish(clipboard.prepare_text_read(selection, text.len() - 1)),
+                    Err(ClipboardReadError::TooLarge)
+                );
             }
         }
     }
@@ -503,7 +544,100 @@ fn owned_text_only_selections_preserve_bytes_without_path_synthesis() {
         gpui::ClipboardSelection::Clipboard,
         gpui::ClipboardSelection::Primary,
     ] {
-        assert_eq!(clipboard.read_text(selection, 1024), None);
+        assert_eq!(
+            finish(clipboard.prepare_text_read(selection, 1024)),
+            Ok(None)
+        );
     }
     assert!(owner.requests.lock().unwrap().is_empty());
+}
+
+/// Completes a prepared read on the calling thread.
+fn finish<T>(read: PreparedRead<T>) -> T {
+    match read {
+        PreparedRead::Ready(value) => value,
+        PreparedRead::Transfer(transfer) => transfer(),
+    }
+}
+
+fn external_clipboard(
+    owner: &Owner,
+) -> (
+    Clipboard,
+    calloop::EventLoop<'static, WaylandClientStatePtr>,
+) {
+    let event_loop = calloop::EventLoop::try_new().unwrap();
+    let mut clipboard = Clipboard::new(owner.connection.clone(), event_loop.handle());
+    clipboard.set_offer(owner.reader.clipboard.clone());
+    clipboard.set_primary_offer(owner.reader.primary.clone());
+    (clipboard, event_loop)
+}
+
+#[test]
+fn slow_owner_reads_prepare_at_once_and_complete_on_another_thread() {
+    let delay = Duration::from_millis(300);
+    let owner = Owner::answering(vec!["text/plain"], b"a\r\nb".to_vec(), Answer::After(delay));
+    let (clipboard, _event_loop) = external_clipboard(&owner);
+    for selection in [ClipboardSelection::Clipboard, ClipboardSelection::Primary] {
+        let started = Instant::now();
+        let text = clipboard.prepare_text_read(selection, 1024);
+        let item = clipboard.prepare_read(selection);
+        assert!(started.elapsed() < delay, "preparing a read must not wait");
+        let (PreparedRead::Transfer(text), PreparedRead::Transfer(item)) = (text, item) else {
+            panic!("an external owner must answer through a transfer");
+        };
+        let transfers = std::thread::spawn(move || (text(), item()));
+        assert_eq!(
+            transfers.join().unwrap(),
+            (
+                Ok(Some("a\r\nb".to_owned())),
+                Ok(Some(ClipboardItem::new_string("a\nb".to_owned())))
+            )
+        );
+        assert!(started.elapsed() >= delay);
+    }
+}
+
+#[test]
+fn stalled_owner_reads_end_at_the_deadline_with_a_typed_failure() {
+    let owner = Owner::answering(vec!["text/plain"], b"never".to_vec(), Answer::Never);
+    let (clipboard, _event_loop) = external_clipboard(&owner);
+    let started = Instant::now();
+    let read = clipboard.prepare_text_read_within(
+        ClipboardSelection::Clipboard,
+        1024,
+        ClipboardTransfer::new(Duration::from_millis(100)),
+    );
+    assert_eq!(finish(read), Err(ClipboardReadError::TimedOut));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn external_items_are_retained_only_while_their_offer_is_the_selection() {
+    let owner = Owner::new(vec!["text/plain"], b"external".to_vec());
+    let (mut clipboard, _event_loop) = external_clipboard(&owner);
+    let selection = ClipboardSelection::Clipboard;
+    let offer = clipboard.offer_id(selection).unwrap();
+    let item = finish(clipboard.prepare_read(selection)).unwrap().unwrap();
+    assert_eq!(item.text().as_deref(), Some("external"));
+    clipboard.retain_read(selection, &offer, item.clone());
+    assert!(matches!(
+        clipboard.prepare_read(selection),
+        PreparedRead::Ready(Ok(Some(ref cached))) if *cached == item
+    ));
+    assert_eq!(owner.requests.lock().unwrap().len(), 1);
+
+    // An item read from one selection's offer cannot answer for the other selection.
+    clipboard.retain_read(ClipboardSelection::Primary, &offer, item.clone());
+    assert!(matches!(
+        clipboard.prepare_read(ClipboardSelection::Primary),
+        PreparedRead::Transfer(_)
+    ));
+    // A read that completes after its offer was replaced cannot answer for the new selection.
+    clipboard.set_offer(None);
+    clipboard.retain_read(selection, &offer, item);
+    assert!(matches!(
+        clipboard.prepare_read(selection),
+        PreparedRead::Ready(Ok(None))
+    ));
 }

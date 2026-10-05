@@ -1526,12 +1526,13 @@ impl App {
         self.platform.window_background_support()
     }
 
-    /// Reads bounded exact UTF-8 text only from the requested native selection.
+    /// Reads bounded exact UTF-8 text only from the requested native selection, resolving once
+    /// the selection owner answers or the native read deadline passes.
     pub fn read_selection_text(
         &self,
         selection: crate::ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> Task<Result<Option<String>, ClipboardReadError>> {
         self.platform.read_selection_text(selection, max_bytes)
     }
 
@@ -1582,6 +1583,20 @@ impl App {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub fn read_from_primary(&self) -> Option<ClipboardItem> {
         self.platform.read_from_primary()
+    }
+
+    /// Reads data from the primary selection buffer, resolving once the
+    /// contents are available.
+    ///
+    /// Prefer this over [`App::read_from_primary`] in code that can await:
+    /// it does not block the calling thread while another program transfers
+    /// the selection.
+    /// Only available on Linux.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        self.platform.read_from_primary_async()
     }
 
     /// Writes data to the primary selection buffer.

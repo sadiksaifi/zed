@@ -46,7 +46,7 @@ use x11rb::{
     wrapper::ConnectionExt as _,
 };
 
-use gpui::{ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
+use gpui::{ClipboardItem, ClipboardReadError, ExternalPaths, Image, ImageFormat, hash};
 use strum::IntoEnumIterator;
 
 use crate::linux::clipboard_formats::{
@@ -54,7 +54,9 @@ use crate::linux::clipboard_formats::{
     file_list_item, parse_gnome_copied_files, parse_uri_list,
 };
 
-use crate::linux::clipboard_transfer::{CLIPBOARD_READ_TIMEOUT, ClipboardTransfer, TransferError};
+use crate::linux::clipboard_transfer::{
+    CLIPBOARD_READ_TIMEOUT, ClipboardTransfer, PreparedRead, TransferError,
+};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -118,6 +120,10 @@ struct GlobalClipboard {
 
     /// Join handle to the thread which serves selection requests.
     server_handle: JoinHandle<()>,
+
+    /// Live [`Clipboard`] handles. Background reads also share `inner`, so this count, not the
+    /// strong count, decides when the last handle hands the contents to the clipboard manager.
+    handles: usize,
 }
 
 struct XContext {
@@ -974,7 +980,8 @@ pub(crate) struct Clipboard {
 impl Clipboard {
     pub(crate) fn new() -> Result<Self> {
         let mut global_cb = CLIPBOARD.lock();
-        if let Some(global_cb) = &*global_cb {
+        if let Some(global_cb) = &mut *global_cb {
+            global_cb.handles += 1;
             return Ok(Self {
                 inner: Arc::clone(&global_cb.inner),
             });
@@ -995,6 +1002,7 @@ impl Clipboard {
         *global_cb = Some(GlobalClipboard {
             inner: Arc::clone(&ctx),
             server_handle: join_handle,
+            handles: 1,
         });
         Ok(Self { inner: ctx })
     }
@@ -1036,22 +1044,10 @@ impl Clipboard {
             data,
             selection,
             wait,
-            item.bounded_text(crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES),
+            item.bounded_text(crate::linux::clipboard_transfer::MAX_CLIPBOARD_BYTES)
+                .ok()
+                .flatten(),
         )
-    }
-
-    fn image_format_atom(&self, format: ImageFormat) -> Atom {
-        match format {
-            ImageFormat::Png => self.inner.atoms.PNG__MIME,
-            ImageFormat::Jpeg => self.inner.atoms.JPEG_MIME,
-            ImageFormat::Webp => self.inner.atoms.WEBP_MIME,
-            ImageFormat::Gif => self.inner.atoms.GIF__MIME,
-            ImageFormat::Svg => self.inner.atoms.SVG__MIME,
-            ImageFormat::Bmp => self.inner.atoms.BMP__MIME,
-            ImageFormat::Tiff => self.inner.atoms.TIFF_MIME,
-            ImageFormat::Ico => self.inner.atoms.ICO__MIME,
-            ImageFormat::Pnm => self.inner.atoms.PNM__MIME,
-        }
     }
 
     #[allow(unused)]
@@ -1061,7 +1057,7 @@ impl Clipboard {
         selection: ClipboardKind,
         wait: WaitConfig,
     ) -> Result<()> {
-        let format = self.image_format_atom(image.format);
+        let format = self.inner.image_format_atom(image.format);
         let data = vec![ClipboardData {
             bytes: image.bytes,
             format: self.inner.atoms.PNG__MIME,
@@ -1070,7 +1066,84 @@ impl Clipboard {
     }
 
     pub(crate) fn get_any(&self, selection: ClipboardKind) -> Result<ClipboardItem> {
-        let atoms = &self.inner.atoms;
+        self.inner.get_any(
+            selection,
+            &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
+        )
+    }
+
+    /// Prepares an item read. A selection this client owns answers at once; an external
+    /// transfer may run on another thread.
+    pub(crate) fn prepare_read(
+        &self,
+        selection: ClipboardKind,
+    ) -> PreparedRead<std::result::Result<Option<ClipboardItem>, ClipboardReadError>> {
+        let mut transfer = ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
+        if self.is_owner(selection) {
+            return PreparedRead::Ready(read_result(self.inner.get_any(selection, &mut transfer)));
+        }
+        let inner = Arc::clone(&self.inner);
+        PreparedRead::transfer(move || read_result(inner.get_any(selection, &mut transfer)))
+    }
+
+    /// Prepares a bounded exact text read; the transfer may run on another thread.
+    pub(crate) fn prepare_text_read(
+        &self,
+        selection: ClipboardKind,
+        max_bytes: usize,
+    ) -> PreparedRead<std::result::Result<Option<String>, ClipboardReadError>> {
+        self.prepare_text_read_within(
+            selection,
+            max_bytes,
+            ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT),
+        )
+    }
+
+    fn prepare_text_read_within(
+        &self,
+        selection: ClipboardKind,
+        max_bytes: usize,
+        mut transfer: ClipboardTransfer,
+    ) -> PreparedRead<std::result::Result<Option<String>, ClipboardReadError>> {
+        if self.is_owner(selection) {
+            return PreparedRead::Ready(read_result(self.inner.get_text(
+                selection,
+                max_bytes,
+                &mut transfer,
+            )));
+        }
+        let inner = Arc::clone(&self.inner);
+        PreparedRead::transfer(move || {
+            read_result(inner.get_text(selection, max_bytes, &mut transfer))
+        })
+    }
+
+    pub fn is_owner(&self, selection: ClipboardKind) -> bool {
+        self.inner.is_owner(selection).unwrap_or(false)
+    }
+}
+
+impl Inner {
+    fn image_format_atom(&self, format: ImageFormat) -> Atom {
+        match format {
+            ImageFormat::Png => self.atoms.PNG__MIME,
+            ImageFormat::Jpeg => self.atoms.JPEG_MIME,
+            ImageFormat::Webp => self.atoms.WEBP_MIME,
+            ImageFormat::Gif => self.atoms.GIF__MIME,
+            ImageFormat::Svg => self.atoms.SVG__MIME,
+            ImageFormat::Bmp => self.atoms.BMP__MIME,
+            ImageFormat::Tiff => self.atoms.TIFF_MIME,
+            ImageFormat::Ico => self.atoms.ICO__MIME,
+            ImageFormat::Pnm => self.atoms.PNM__MIME,
+        }
+    }
+
+    fn get_any(
+        &self,
+        selection: ClipboardKind,
+        transfer: &mut ClipboardTransfer,
+    ) -> Result<ClipboardItem> {
+        let atoms = &self.atoms;
         let image_entries = ImageFormat::iter()
             .map(|format| (self.image_format_atom(format), format))
             .collect::<Vec<_>>();
@@ -1083,25 +1156,23 @@ impl Clipboard {
         format_atoms.extend_from_slice(&self.text_format_atoms());
         format_atoms.extend(image_entries.iter().map(|(atom, _)| *atom));
 
-        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
-        let mut result = self.inner.read(&format_atoms, selection, transfer)?;
+        let mut result = self.read(&format_atoms, selection, transfer)?;
 
         log::trace!(
             "read clipboard as format {:?}",
-            self.inner.atom_name(result.format)
+            self.atom_name(result.format)
         );
 
         if file_list_format_atoms.contains(&result.format) {
             if let Some(paths) = self.file_paths(&result) {
                 let text = self
-                    .inner
                     .read(&self.text_format_atoms(), selection, transfer)
                     .and_then(|data| self.decode_text(data))
                     .ok();
                 return Ok(file_list_item(paths, text));
             }
             // The file list names something other than local files, so read the rest.
-            result = self.inner.read(
+            result = self.read(
                 &format_atoms[file_list_format_atoms.len()..],
                 selection,
                 transfer,
@@ -1124,8 +1195,13 @@ impl Clipboard {
     }
 
     /// Reads only text representations, preserving the owner's UTF-8 bytes.
-    pub(crate) fn get_text(&self, selection: ClipboardKind, max_bytes: usize) -> Result<String> {
-        let atoms = &self.inner.atoms;
+    fn get_text(
+        &self,
+        selection: ClipboardKind,
+        max_bytes: usize,
+        transfer: &mut ClipboardTransfer,
+    ) -> Result<String> {
+        let atoms = &self.atoms;
         // STRING is Latin-1, so it cannot satisfy the exact UTF-8 contract.
         let formats = [
             atoms.UTF8_STRING,
@@ -1133,15 +1209,12 @@ impl Clipboard {
             atoms.UTF8_MIME_1,
             atoms.TEXT_MIME_UNKNOWN,
         ];
-        let transfer = &mut ClipboardTransfer::new(CLIPBOARD_READ_TIMEOUT);
-        let data = self
-            .inner
-            .read_limited(&formats, selection, transfer, Some(max_bytes))?;
+        let data = self.read_limited(&formats, selection, transfer, Some(max_bytes))?;
         String::from_utf8(data.bytes).map_err(|_| Error::ConversionFailure)
     }
 
     fn text_format_atoms(&self) -> [Atom; 6] {
-        let atoms = &self.inner.atoms;
+        let atoms = &self.atoms;
         [
             atoms.UTF8_STRING,
             atoms.UTF8_MIME_0,
@@ -1153,7 +1226,7 @@ impl Clipboard {
     }
 
     fn decode_text(&self, data: ClipboardData) -> Result<String> {
-        if data.format == self.inner.atoms.STRING {
+        if data.format == self.atoms.STRING {
             Ok(data.bytes.into_iter().map(|c| c as char).collect())
         } else {
             String::from_utf8(data.bytes).map_err(|_| Error::ConversionFailure)
@@ -1161,31 +1234,41 @@ impl Clipboard {
     }
 
     fn file_paths(&self, file_list: &ClipboardData) -> Option<ExternalPaths> {
-        if file_list.format == self.inner.atoms.URI_LIST {
+        if file_list.format == self.atoms.URI_LIST {
             parse_uri_list(&file_list.bytes)
         } else {
             parse_gnome_copied_files(&file_list.bytes)
         }
     }
+}
 
-    pub fn is_owner(&self, selection: ClipboardKind) -> bool {
-        self.inner.is_owner(selection).unwrap_or(false)
+/// Classifies a failed read without its contents. A selection without a requested
+/// representation has no contents.
+fn read_result<T>(result: Result<T>) -> std::result::Result<Option<T>, ClipboardReadError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::ContentNotAvailable) => Ok(None),
+        Err(Error::Transfer(error)) => Err(error.into()),
+        Err(Error::ConversionFailure) => Err(ClipboardReadError::UnsupportedContent),
+        Err(_) => Err(ClipboardReadError::Unavailable),
     }
 }
 
 impl Drop for Clipboard {
     fn drop(&mut self) {
-        // There are always at least 3 owners:
-        // the global, the server thread, and one `Clipboard::inner`
-        const MIN_OWNERS: usize = 3;
-
         // We start with locking the global guard to prevent race
         // conditions below.
         let mut global_cb = CLIPBOARD.lock();
-        if Arc::strong_count(&self.inner) == MIN_OWNERS {
-            // If the are the only owners of the clipboard are ourselves and
-            // the global object, then we should destroy the global object,
-            // and send the data to the clipboard manager
+        let Some(global) = global_cb
+            .as_mut()
+            .filter(|global| Arc::ptr_eq(&global.inner, &self.inner))
+        else {
+            return;
+        };
+        global.handles -= 1;
+        if global.handles == 0 {
+            // The last handle destroys the global object and sends the data to the clipboard
+            // manager, even while a background read still shares the state.
 
             if let Err(e) = self.inner.ask_clipboard_manager_to_request_our_data() {
                 log::error!(
@@ -1396,6 +1479,11 @@ mod tests {
 
     impl Owner {
         fn new(selection: ClipboardKind, offer: Offer) -> Self {
+            Self::answering_after(selection, offer, Duration::ZERO)
+        }
+
+        /// Answers each selection request only after `delay`.
+        fn answering_after(selection: ClipboardKind, offer: Offer, delay: Duration) -> Self {
             let context = XContext::new().expect("private X11 display required");
             let atoms = Atoms::new(&context.conn).unwrap().reply().unwrap();
             let selection = match selection {
@@ -1424,6 +1512,7 @@ mod tests {
                         };
                         match event {
                             Event::SelectionRequest(event) => {
+                                std::thread::sleep(delay);
                                 requests.lock().push(event.target);
                                 let mut property = event.property;
                                 if event.target == atoms.TARGETS {
@@ -1688,20 +1777,38 @@ mod tests {
         };
         for selection in [ClipboardKind::Clipboard, ClipboardKind::Primary] {
             for (files, image, text, expected) in [
-                (false, true, None, None),
-                (true, false, None, None),
+                (false, true, None, Ok(None)),
+                (true, false, None, Ok(None)),
                 (
                     true,
                     true,
                     Some(b"a\r\nb".to_vec()),
-                    Some("a\r\nb".to_owned()),
+                    Ok(Some("a\r\nb".to_owned())),
                 ),
-                (false, false, Some(vec![0xff]), None),
-                (false, false, Some(vec![b'x'; 1024]), Some("x".repeat(1024))),
-                (false, false, Some(vec![b'x'; 1025]), None),
+                (
+                    false,
+                    false,
+                    Some(vec![0xff]),
+                    Err(ClipboardReadError::UnsupportedContent),
+                ),
+                (
+                    false,
+                    false,
+                    Some(vec![b'x'; 1024]),
+                    Ok(Some("x".repeat(1024))),
+                ),
+                (
+                    false,
+                    false,
+                    Some(vec![b'x'; 1025]),
+                    Err(ClipboardReadError::TooLarge),
+                ),
             ] {
                 let owner = Owner::new(selection, Offer::TextOnly { files, image, text });
-                assert_eq!(clipboard.get_text(selection, 1024).ok(), expected);
+                assert_eq!(
+                    finish(clipboard.prepare_text_read(selection, 1024)),
+                    expected
+                );
                 let requests = owner.requests.lock();
                 assert!(!requests.contains(&inner.atoms.URI_LIST));
                 assert!(!requests.contains(&inner.atoms.PNG__MIME));
@@ -1725,9 +1832,17 @@ mod tests {
                         WaitConfig::None,
                     )
                     .unwrap();
-                assert_eq!(clipboard.get_text(selection, text.len()).unwrap(), text);
+                // A selection this client owns answers without a transfer.
+                let PreparedRead::Ready(read) = clipboard.prepare_text_read(selection, text.len())
+                else {
+                    panic!("an owned selection must answer at once");
+                };
+                assert_eq!(read, Ok(Some(text.to_owned())));
                 if !text.is_empty() {
-                    assert!(clipboard.get_text(selection, text.len() - 1).is_err());
+                    assert_eq!(
+                        finish(clipboard.prepare_text_read(selection, text.len() - 1)),
+                        Err(ClipboardReadError::TooLarge)
+                    );
                 }
             }
             let item = ClipboardItem {
@@ -1738,7 +1853,10 @@ mod tests {
             clipboard
                 .set_item(&item, selection, WaitConfig::None)
                 .unwrap();
-            assert!(clipboard.get_text(selection, 1024).is_err());
+            assert_eq!(
+                finish(clipboard.prepare_text_read(selection, 1024)),
+                Ok(None)
+            );
         }
     }
 
@@ -1792,5 +1910,190 @@ mod tests {
             Err(Error::Transfer(TransferError::TimedOut))
         ));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// Completes a prepared read on the calling thread.
+    fn finish<T>(read: PreparedRead<T>) -> T {
+        match read {
+            PreparedRead::Ready(value) => value,
+            PreparedRead::Transfer(transfer) => transfer(),
+        }
+    }
+
+    #[test]
+    fn failed_reads_are_classified_without_contents() {
+        assert_eq!(read_result(Ok("text")), Ok(Some("text")));
+        assert_eq!(read_result::<()>(Err(Error::ContentNotAvailable)), Ok(None));
+        for (error, expected) in [
+            (
+                Error::Transfer(TransferError::TimedOut),
+                ClipboardReadError::TimedOut,
+            ),
+            (
+                Error::Transfer(TransferError::TooLarge),
+                ClipboardReadError::TooLarge,
+            ),
+            (
+                Error::ConversionFailure,
+                ClipboardReadError::UnsupportedContent,
+            ),
+            (Error::ConnectionFailed, ClipboardReadError::Unavailable),
+            (Error::ClipboardOccupied, ClipboardReadError::Unavailable),
+            (Error::unknown("detail"), ClipboardReadError::Unavailable),
+        ] {
+            assert_eq!(read_result::<()>(Err(error)), Err(expected));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn slow_owner_reads_prepare_at_once_and_complete_on_another_thread() {
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
+        let delay = Duration::from_millis(150);
+        let _owner = Owner::answering_after(
+            ClipboardKind::Clipboard,
+            Offer::TextOnly {
+                files: false,
+                image: false,
+                text: Some(b"slow".to_vec()),
+            },
+            delay,
+        );
+        let started = Instant::now();
+        let PreparedRead::Transfer(read) =
+            clipboard.prepare_text_read(ClipboardKind::Clipboard, 1024)
+        else {
+            panic!("an external owner must answer through a transfer");
+        };
+        assert!(started.elapsed() < delay, "preparing a read must not wait");
+        assert_eq!(
+            std::thread::spawn(read).join().unwrap(),
+            Ok(Some("slow".to_owned()))
+        );
+        assert!(started.elapsed() >= delay);
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn stalled_owner_reads_end_at_the_deadline_with_a_typed_failure() {
+        let inner = DISPLAY_TEST.lock();
+        let clipboard = Clipboard {
+            inner: Arc::clone(&inner),
+        };
+        let _owner = Owner::new(ClipboardKind::Clipboard, Offer::Trickle);
+        let started = Instant::now();
+        let read = clipboard.prepare_text_read_within(
+            ClipboardKind::Clipboard,
+            MAX_CLIPBOARD_BYTES,
+            ClipboardTransfer::new(Duration::from_millis(100)),
+        );
+        assert_eq!(finish(read), Err(ClipboardReadError::TimedOut));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A clipboard manager that records each target it is asked to convert, without answering.
+    struct Manager {
+        stopped: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+        requests: Arc<Mutex<Vec<Atom>>>,
+    }
+
+    impl Manager {
+        fn new() -> Self {
+            let context = XContext::new().expect("private X11 display required");
+            let atoms = Atoms::new(&context.conn).unwrap().reply().unwrap();
+            context
+                .conn
+                .set_selection_owner(context.win_id, atoms.CLIPBOARD_MANAGER, Time::CURRENT_TIME)
+                .unwrap()
+                .check()
+                .unwrap();
+            context.conn.flush().unwrap();
+            let stopped = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let worker = std::thread::spawn({
+                let requests = requests.clone();
+                let stopped = stopped.clone();
+                move || {
+                    while !stopped.load(Ordering::Relaxed) {
+                        match context.conn.poll_for_event().unwrap() {
+                            Some(Event::SelectionRequest(event)) => {
+                                requests.lock().push(event.target);
+                            }
+                            Some(_) => {}
+                            None => std::thread::sleep(Duration::from_millis(1)),
+                        }
+                    }
+                }
+            });
+            Self {
+                stopped,
+                worker: Some(worker),
+                requests,
+            }
+        }
+
+        fn was_asked_for(&self, target: Atom, within: Duration) -> bool {
+            let deadline = Instant::now() + within;
+            while Instant::now() < deadline {
+                if self.requests.lock().contains(&target) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            false
+        }
+    }
+
+    impl Drop for Manager {
+        fn drop(&mut self) {
+            self.stopped.store(true, Ordering::Relaxed);
+            self.worker.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a private X11 display"]
+    fn the_last_clipboard_hands_over_to_the_manager_while_a_read_is_in_flight() {
+        let display = DISPLAY_TEST.lock();
+        let manager = Manager::new();
+        let clipboard = Clipboard::new().unwrap();
+        clipboard
+            .set_item(
+                &ClipboardItem::new_string("kept".into()),
+                ClipboardKind::Clipboard,
+                WaitConfig::None,
+            )
+            .unwrap();
+        let _owner = Owner::answering_after(
+            ClipboardKind::Primary,
+            Offer::TextOnly {
+                files: false,
+                image: false,
+                text: Some(b"slow".to_vec()),
+            },
+            Duration::from_millis(300),
+        );
+        let PreparedRead::Transfer(read) = clipboard.prepare_read(ClipboardKind::Primary) else {
+            panic!("an external owner must answer through a transfer");
+        };
+        let read = std::thread::spawn(read);
+
+        drop(clipboard);
+
+        assert!(
+            manager.was_asked_for(display.atoms.SAVE_TARGETS, Duration::from_secs(1)),
+            "the clipboard manager must be asked to save the contents"
+        );
+        assert!(CLIPBOARD.lock().is_none());
+        assert_eq!(
+            read.join()
+                .unwrap()
+                .map(|item| item.and_then(|item| item.text())),
+            Ok(Some("slow".to_owned()))
+        );
     }
 }

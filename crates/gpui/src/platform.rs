@@ -380,13 +380,15 @@ pub trait Platform: 'static {
 
     /// Reads only text representations, without normalization or file-path synthesis.
     /// Unsupported platforms return no text. Implementations enforce `max_bytes` before retaining
-    /// external payloads, with an additional native transfer ceiling.
+    /// external payloads, with an additional native transfer ceiling and deadline, and transfer
+    /// external payloads without blocking the calling thread. Dropping the task discards the
+    /// result.
     fn read_selection_text(
         &self,
         _selection: ClipboardSelection,
         _max_bytes: usize,
-    ) -> Option<String> {
-        None
+    ) -> Task<Result<Option<String>, ClipboardReadError>> {
+        Task::ready(Ok(None))
     }
 
     /// Attempts to claim a selection. Missing native prerequisites leave retained contents intact.
@@ -415,6 +417,14 @@ pub trait Platform: 'static {
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn read_from_primary(&self) -> Option<ClipboardItem>;
+    /// Reads the primary selection, resolving once its contents are available.
+    ///
+    /// Platforms whose selection owners answer through a transfer override this method so that
+    /// the transfer does not block the calling thread.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn read_from_primary_async(&self) -> Task<Result<Option<ClipboardItem>, ClipboardReadError>> {
+        Task::ready(Ok(self.read_from_primary()))
+    }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn write_to_primary(&self, item: ClipboardItem);
 
@@ -2833,7 +2843,8 @@ pub enum ClipboardWriteError {
     Unavailable,
 }
 
-/// An error produced by [`Platform::read_from_clipboard_async`].
+/// An error produced by an asynchronous clipboard read, such as
+/// [`Platform::read_from_clipboard_async`].
 ///
 /// Callers surface these failures to users, so the variants distinguish
 /// conditions that call for different user-facing guidance.
@@ -2849,6 +2860,10 @@ pub enum ClipboardReadError {
     /// The clipboard contents could not be converted into a
     /// [`ClipboardItem`].
     UnsupportedContent,
+    /// The clipboard owner did not complete the transfer before the read deadline.
+    TimedOut,
+    /// The clipboard contents exceed the read's byte limit.
+    TooLarge,
 }
 
 impl std::fmt::Display for ClipboardReadError {
@@ -2861,6 +2876,8 @@ impl std::fmt::Display for ClipboardReadError {
             Self::UnsupportedContent => {
                 formatter.write_str("the clipboard contents are unsupported")
             }
+            Self::TimedOut => formatter.write_str("the clipboard read timed out"),
+            Self::TooLarge => formatter.write_str("the clipboard contents exceed the byte limit"),
         }
     }
 }
@@ -2943,20 +2960,21 @@ impl ClipboardItem {
     }
 
     /// Returns only explicit text entries within the byte limit, without synthesizing paths.
-    pub fn bounded_text(&self, max_bytes: usize) -> Option<String> {
+    /// An item without text entries has no text.
+    pub fn bounded_text(&self, max_bytes: usize) -> Result<Option<String>, ClipboardReadError> {
         let mut length = 0usize;
         let mut has_text = false;
         for entry in &self.entries {
             if let ClipboardEntry::String(string) = entry {
                 has_text = true;
-                length = length.checked_add(string.text.len())?;
-                if length > max_bytes {
-                    return None;
-                }
+                length = length
+                    .checked_add(string.text.len())
+                    .filter(|length| *length <= max_bytes)
+                    .ok_or(ClipboardReadError::TooLarge)?;
             }
         }
         if !has_text {
-            return None;
+            return Ok(None);
         }
         let mut text = String::with_capacity(length);
         for entry in &self.entries {
@@ -2964,7 +2982,7 @@ impl ClipboardItem {
                 text.push_str(&string.text);
             }
         }
-        Some(text)
+        Ok(Some(text))
     }
 
     /// If this item is one string, returns its HTML alternate without changing its plain text.
@@ -3513,20 +3531,18 @@ mod tests {
                 ClipboardEntry::String(ClipboardString::new("é".into())),
             ],
         };
-        assert_eq!(item.bounded_text(5).as_deref(), Some("a\r\né"));
-        assert_eq!(item.bounded_text(4), None);
+        assert_eq!(item.bounded_text(5), Ok(Some("a\r\né".to_owned())));
+        assert_eq!(item.bounded_text(4), Err(ClipboardReadError::TooLarge));
         assert_eq!(
-            ClipboardItem::new_string(String::new())
-                .bounded_text(0)
-                .as_deref(),
-            Some("")
+            ClipboardItem::new_string(String::new()).bounded_text(0),
+            Ok(Some(String::new()))
         );
         let files = ClipboardItem {
             entries: vec![ClipboardEntry::ExternalPaths(crate::ExternalPaths(
                 vec!["/tmp/fixture".into()].into(),
             ))],
         };
-        assert_eq!(files.bounded_text(1024), None);
+        assert_eq!(files.bounded_text(1024), Ok(None));
     }
 
     #[test]

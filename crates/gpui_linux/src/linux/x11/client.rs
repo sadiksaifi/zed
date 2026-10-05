@@ -67,7 +67,7 @@ use crate::linux::{
 use gpui::{
     AnyWindowHandle, Bounds, ClipboardItem, CursorStyle, DisplayId, FileDropEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, Pixels, PlatformDisplay, PlatformInput,
-    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size,
+    PlatformKeyboardLayout, PlatformWindow, Point, RequestFrameOptions, ScrollDelta, Size, Task,
     TouchPhase, WindowBackgroundSupport, WindowButtonLayout, WindowParams, WindowVisibility, point,
     px,
 };
@@ -1849,13 +1849,16 @@ impl LinuxClient for X11Client {
         &self,
         selection: gpui::ClipboardSelection,
         max_bytes: usize,
-    ) -> Option<String> {
+    ) -> Task<Result<Option<String>, gpui::ClipboardReadError>> {
         let state = self.0.borrow();
         let kind = match selection {
             gpui::ClipboardSelection::Clipboard => clipboard::ClipboardKind::Clipboard,
             gpui::ClipboardSelection::Primary => clipboard::ClipboardKind::Primary,
         };
-        state.clipboard.get_text(kind, max_bytes).ok()
+        state
+            .clipboard
+            .prepare_text_read(kind, max_bytes)
+            .spawn(&state.common.background_executor)
     }
 
     fn try_write_selection(
@@ -1929,6 +1932,33 @@ impl LinuxClient for X11Client {
             .get_any(clipboard::ClipboardKind::Clipboard)
             .context("X11: Failed to read from clipboard (clipboard)")
             .log_with_level(log::Level::Debug)
+    }
+
+    fn read_from_primary_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        state
+            .clipboard
+            .prepare_read(clipboard::ClipboardKind::Primary)
+            .spawn(&state.common.background_executor)
+    }
+
+    fn read_from_clipboard_async(
+        &self,
+    ) -> Task<Result<Option<gpui::ClipboardItem>, gpui::ClipboardReadError>> {
+        let state = self.0.borrow();
+        // The item this app copied carries metadata that the X11 selection does not.
+        if state
+            .clipboard
+            .is_owner(clipboard::ClipboardKind::Clipboard)
+        {
+            return Task::ready(Ok(state.clipboard_item.clone()));
+        }
+        state
+            .clipboard
+            .prepare_read(clipboard::ClipboardKind::Clipboard)
+            .spawn(&state.common.background_executor)
     }
 
     fn run(&self) {
