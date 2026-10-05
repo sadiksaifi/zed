@@ -81,6 +81,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `feat(gpui_linux): report the modifier role of XKB modifier keys`
 - `feat(gpui_linux): read clipboards without blocking the main thread`
 - `fix(gpui_linux): answer owned X11 selections from retained contents only`
+- `fix(gpui_linux): request Wayland offers before their transfer runs`
 
 ## Monthly rebase
 

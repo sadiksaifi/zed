@@ -641,3 +641,59 @@ fn external_items_are_retained_only_while_their_offer_is_the_selection() {
         PreparedRead::Ready(Ok(None))
     ));
 }
+
+/// Destroys both selection offers the way the client does when a new offer replaces them.
+fn destroy_offers(owner: &Owner, clipboard: &mut Clipboard) {
+    owner.reader.clipboard.as_ref().unwrap().inner.destroy();
+    owner.reader.primary.as_ref().unwrap().inner.destroy();
+    clipboard.set_offer(None);
+    clipboard.set_primary_offer(None);
+}
+
+#[test]
+fn reads_prepared_before_their_offer_is_destroyed_still_complete() {
+    let owner = Owner::new(vec!["text/plain"], b"external".to_vec());
+    let (mut clipboard, _event_loop) = external_clipboard(&owner);
+    let reads = [ClipboardSelection::Clipboard, ClipboardSelection::Primary].map(|selection| {
+        (
+            clipboard.prepare_text_read(selection, 1024),
+            clipboard.prepare_read(selection),
+        )
+    });
+    destroy_offers(&owner, &mut clipboard);
+    for (text, item) in reads {
+        assert_eq!(finish(text), Ok(Some("external".to_owned())));
+        assert_eq!(
+            finish(item),
+            Ok(Some(ClipboardItem::new_string("external".to_owned())))
+        );
+    }
+}
+
+#[test]
+fn reads_of_a_destroyed_offer_fail_instead_of_answering_empty() {
+    let owner = Owner::new(vec!["text/plain", "image/png"], vec![0xff]);
+    let (mut clipboard, _event_loop) = external_clipboard(&owner);
+    // Invalid text sends the item read on to the image, after the offer is destroyed.
+    let items = [ClipboardSelection::Clipboard, ClipboardSelection::Primary]
+        .map(|selection| clipboard.prepare_read(selection));
+    let offers = (owner.reader.clipboard.clone(), owner.reader.primary.clone());
+    destroy_offers(&owner, &mut clipboard);
+    for item in items {
+        assert_eq!(finish(item), Err(ClipboardReadError::Unavailable));
+    }
+
+    // An offer destroyed while it is still the selection cannot answer either.
+    clipboard.set_offer(offers.0);
+    clipboard.set_primary_offer(offers.1);
+    for selection in [ClipboardSelection::Clipboard, ClipboardSelection::Primary] {
+        assert_eq!(
+            finish(clipboard.prepare_text_read(selection, 1024)),
+            Err(ClipboardReadError::Unavailable)
+        );
+        assert_eq!(
+            finish(clipboard.prepare_read(selection)),
+            Err(ClipboardReadError::Unavailable)
+        );
+    }
+}

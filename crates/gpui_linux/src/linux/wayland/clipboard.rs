@@ -11,10 +11,16 @@ use calloop::{
     LoopHandle, PostAction,
     timer::{TimeoutAction, Timer},
 };
-use filedescriptor::Pipe;
+use filedescriptor::{FileDescriptor, Pipe};
 use strum::IntoEnumIterator;
-use wayland_client::{Connection, Proxy, backend::ObjectId, protocol::wl_data_offer::WlDataOffer};
-use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
+use wayland_client::{
+    Connection, Proxy,
+    backend::{InvalidId, ObjectId, WaylandError},
+    protocol::wl_data_offer::{self, WlDataOffer},
+};
+use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::{
+    self, ZwpPrimarySelectionOfferV1,
+};
 
 use crate::linux::{
     WaylandClientStatePtr,
@@ -98,18 +104,21 @@ impl OwnedSelection {
 }
 
 pub(crate) trait ReceiveData {
-    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>);
+    /// Asks the offer's source to write `mime_type` to `fd`, failing once the offer is destroyed.
+    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) -> Result<(), InvalidId>;
 }
 
+// The generated `receive` methods discard the failure for a destroyed offer, which would leave the
+// pipe to end without contents.
 impl ReceiveData for WlDataOffer {
-    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) {
-        self.receive(mime_type, fd);
+    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) -> Result<(), InvalidId> {
+        self.send_request(wl_data_offer::Request::Receive { mime_type, fd })
     }
 }
 
 impl ReceiveData for ZwpPrimarySelectionOfferV1 {
-    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) {
-        self.receive(mime_type, fd);
+    fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) -> Result<(), InvalidId> {
+        self.send_request(zwp_primary_selection_offer_v1::Request::Receive { mime_type, fd })
     }
 }
 
@@ -118,6 +127,20 @@ impl ReceiveData for ZwpPrimarySelectionOfferV1 {
 pub(crate) struct DataOffer<T: ReceiveData> {
     pub inner: T,
     mime_types: Vec<String>,
+}
+
+/// A representation requested from an offer, with the pipe its source writes to.
+struct Requested {
+    mime_type: &'static str,
+    pipe: FileDescriptor,
+}
+
+/// One read's transfers from an offer, within a single budget.
+struct OfferTransfer {
+    connection: Connection,
+    budget: ClipboardTransfer,
+    /// Requested while the read was prepared, when the offer was still the selection.
+    requested: Option<Requested>,
 }
 
 impl<T: ReceiveData> DataOffer<T> {
@@ -136,24 +159,59 @@ impl<T: ReceiveData> DataOffer<T> {
         self.mime_types.iter().any(|t| t == mime_type)
     }
 
-    fn read_bytes(
+    /// Requests a representation before the offer can be destroyed, so a transfer that runs
+    /// later on another thread still receives it.
+    fn transfer(
         &self,
         connection: &Connection,
-        mime_type: &str,
-        transfer: &mut ClipboardTransfer,
-    ) -> Result<Vec<u8>, ClipboardReadError> {
-        transfer.remaining_time()?;
-        let mut receive = || -> anyhow::Result<Vec<u8>> {
-            let pipe = Pipe::new()?;
-            self.inner.receive_data(mime_type.to_string(), unsafe {
+        mime_type: &'static str,
+        budget: ClipboardTransfer,
+    ) -> Result<OfferTransfer, ClipboardReadError> {
+        Ok(OfferTransfer {
+            requested: Some(self.request(connection, mime_type)?),
+            connection: connection.clone(),
+            budget,
+        })
+    }
+
+    fn request(
+        &self,
+        connection: &Connection,
+        mime_type: &'static str,
+    ) -> Result<Requested, ClipboardReadError> {
+        let pipe = Pipe::new().map_err(|_| ClipboardReadError::Unavailable)?;
+        self.inner
+            .receive_data(mime_type.to_owned(), unsafe {
                 BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
-            });
-            let fd = pipe.read;
-            drop(pipe.write);
-            connection.flush()?;
-            read_fd_with_budget(fd, transfer)
+            })
+            .map_err(|InvalidId| {
+                log::debug!("clipboard offer was destroyed before its transfer");
+                ClipboardReadError::Unavailable
+            })?;
+        drop(pipe.write);
+        // The event loop flushes a request that does not fit in the socket now.
+        if let Err(error) = connection.flush()
+            && !matches!(&error, WaylandError::Io(error) if error.kind() == ErrorKind::WouldBlock)
+        {
+            return Err(ClipboardReadError::Unavailable);
+        }
+        Ok(Requested {
+            mime_type,
+            pipe: pipe.read,
+        })
+    }
+
+    fn read_bytes(
+        &self,
+        transfer: &mut OfferTransfer,
+        mime_type: &'static str,
+    ) -> Result<Vec<u8>, ClipboardReadError> {
+        transfer.budget.remaining_time()?;
+        let requested = match transfer.requested.take() {
+            Some(requested) if requested.mime_type == mime_type => requested,
+            _ => self.request(&transfer.connection, mime_type)?,
         };
-        receive().map_err(|error| {
+        read_fd_with_budget(requested.pipe, &mut transfer.budget).map_err(|error| {
             log::error!("clipboard transfer failed");
             match error.downcast::<TransferError>() {
                 Ok(error) => error.into(),
@@ -169,25 +227,40 @@ impl<T: ReceiveData> DataOffer<T> {
             .find(|mime_type| self.has_mime_type(mime_type))
     }
 
+    fn file_list_mime_type(&self) -> Option<&'static str> {
+        [URI_LIST_MIME_TYPE, GNOME_COPIED_FILES_MIME_TYPE]
+            .into_iter()
+            .find(|mime_type| self.has_mime_type(mime_type))
+    }
+
+    fn image_format(&self) -> Option<ImageFormat> {
+        ImageFormat::iter().find(|format| self.has_mime_type(format.mime_type()))
+    }
+
+    /// The representation an item read requests first: a file list, then text, then an image.
+    fn item_mime_type(&self) -> Option<&'static str> {
+        self.file_list_mime_type()
+            .or_else(|| self.text_mime_type())
+            .or_else(|| self.image_format().map(ImageFormat::mime_type))
+    }
+
     fn read_string(
         &self,
-        connection: &Connection,
-        transfer: &mut ClipboardTransfer,
+        transfer: &mut OfferTransfer,
     ) -> Result<Option<String>, ClipboardReadError> {
         // Ordinary Paste retains its existing line-ending normalization.
-        self.read_string_exact(connection, transfer)
+        self.read_string_exact(transfer)
             .map(|text| text.map(|text| text.replace("\r\n", "\n")))
     }
 
     fn read_string_exact(
         &self,
-        connection: &Connection,
-        transfer: &mut ClipboardTransfer,
+        transfer: &mut OfferTransfer,
     ) -> Result<Option<String>, ClipboardReadError> {
         let Some(mime_type) = self.text_mime_type() else {
             return Ok(None);
         };
-        let bytes = self.read_bytes(connection, mime_type, transfer)?;
+        let bytes = self.read_bytes(transfer, mime_type)?;
         String::from_utf8(bytes)
             .map(Some)
             .map_err(|_| ClipboardReadError::UnsupportedContent)
@@ -195,53 +268,44 @@ impl<T: ReceiveData> DataOffer<T> {
 
     fn read_file_paths(
         &self,
-        connection: &Connection,
-        transfer: &mut ClipboardTransfer,
+        transfer: &mut OfferTransfer,
     ) -> Result<Option<ExternalPaths>, ClipboardReadError> {
-        Ok(if self.has_mime_type(URI_LIST_MIME_TYPE) {
-            parse_uri_list(&self.read_bytes(connection, URI_LIST_MIME_TYPE, transfer)?)
-        } else if self.has_mime_type(GNOME_COPIED_FILES_MIME_TYPE) {
-            parse_gnome_copied_files(&self.read_bytes(
-                connection,
-                GNOME_COPIED_FILES_MIME_TYPE,
-                transfer,
-            )?)
+        let Some(mime_type) = self.file_list_mime_type() else {
+            return Ok(None);
+        };
+        let bytes = self.read_bytes(transfer, mime_type)?;
+        Ok(if mime_type == URI_LIST_MIME_TYPE {
+            parse_uri_list(&bytes)
         } else {
-            None
+            parse_gnome_copied_files(&bytes)
         })
     }
 
     /// Reads the offer as a file list, then text, then an image, within one transfer budget.
     fn read_item(
         &self,
-        connection: &Connection,
-        transfer: &mut ClipboardTransfer,
+        transfer: &mut OfferTransfer,
     ) -> Result<Option<ClipboardItem>, ClipboardReadError> {
-        if let Some(paths) = self.read_file_paths(connection, transfer)? {
+        if let Some(paths) = self.read_file_paths(transfer)? {
             // The file list stands without its text alternate.
-            let text = self.read_string(connection, transfer).ok().flatten();
+            let text = self.read_string(transfer).ok().flatten();
             return Ok(Some(file_list_item(paths, text)));
         }
-        match self.read_string(connection, transfer) {
+        match self.read_string(transfer) {
             Ok(Some(text)) => Ok(Some(ClipboardItem::new_string(text))),
-            Ok(None) | Err(ClipboardReadError::UnsupportedContent) => {
-                self.read_image(connection, transfer)
-            }
+            Ok(None) | Err(ClipboardReadError::UnsupportedContent) => self.read_image(transfer),
             Err(error) => Err(error),
         }
     }
 
     fn read_image(
         &self,
-        connection: &Connection,
-        transfer: &mut ClipboardTransfer,
+        transfer: &mut OfferTransfer,
     ) -> Result<Option<ClipboardItem>, ClipboardReadError> {
-        let Some(format) =
-            ImageFormat::iter().find(|format| self.has_mime_type(format.mime_type()))
-        else {
+        let Some(format) = self.image_format() else {
             return Ok(None);
         };
-        let bytes = self.read_bytes(connection, format.mime_type(), transfer)?;
+        let bytes = self.read_bytes(transfer, format.mime_type())?;
         let id = hash(&bytes);
         Ok(Some(ClipboardItem {
             entries: vec![ClipboardEntry::Image(Image { format, bytes, id })],
@@ -277,8 +341,15 @@ impl<T: ReceiveData + Proxy + Send + 'static> SelectionRead<'_, T> {
         if offer.has_mime_type(self_mime) {
             return PreparedRead::Ready(Ok(self.owned.map(|owned| owned.item.clone())));
         }
-        let (offer, connection, mut transfer) = (offer.clone(), connection.clone(), transfer);
-        PreparedRead::transfer(move || offer.read_item(&connection, &mut transfer))
+        let Some(mime_type) = offer.item_mime_type() else {
+            return PreparedRead::Ready(Ok(None));
+        };
+        let mut transfer = match offer.transfer(connection, mime_type, transfer) {
+            Ok(transfer) => transfer,
+            Err(error) => return PreparedRead::Ready(Err(error)),
+        };
+        let offer = offer.clone();
+        PreparedRead::transfer(move || offer.read_item(&mut transfer))
     }
 
     fn prepare_text(
@@ -297,9 +368,16 @@ impl<T: ReceiveData + Proxy + Send + 'static> SelectionRead<'_, T> {
                     .map_or(Ok(None), |owned| owned.item.bounded_text(max_bytes)),
             );
         }
+        let Some(mime_type) = offer.text_mime_type() else {
+            return PreparedRead::Ready(Ok(None));
+        };
         transfer.limit_bytes(max_bytes);
-        let (offer, connection) = (offer.clone(), connection.clone());
-        PreparedRead::transfer(move || offer.read_string_exact(&connection, &mut transfer))
+        let mut transfer = match offer.transfer(connection, mime_type, transfer) {
+            Ok(transfer) => transfer,
+            Err(error) => return PreparedRead::Ready(Err(error)),
+        };
+        let offer = offer.clone();
+        PreparedRead::transfer(move || offer.read_string_exact(&mut transfer))
     }
 
     fn offer_id(&self) -> Option<ObjectId> {
@@ -412,7 +490,8 @@ impl Clipboard {
         }
     }
 
-    /// Prepares a read of the selection's item; an external transfer may run on another thread.
+    /// Prepares a read of the selection's item. An external offer is asked for its first
+    /// representation now, while it is the selection; the transfer runs on another thread.
     pub fn prepare_read(
         &self,
         selection: ClipboardSelection,
@@ -428,7 +507,8 @@ impl Clipboard {
         }
     }
 
-    /// Prepares a bounded exact text read; an external transfer may run on another thread.
+    /// Prepares a bounded exact text read. An external offer is asked for its text now, while it
+    /// is the selection; the transfer runs on another thread.
     pub fn prepare_text_read(
         &self,
         selection: ClipboardSelection,
@@ -726,7 +806,9 @@ mod tests {
     struct FakeOffer;
 
     impl ReceiveData for FakeOffer {
-        fn receive_data(&self, _mime_type: String, _fd: BorrowedFd<'_>) {}
+        fn receive_data(&self, _mime_type: String, _fd: BorrowedFd<'_>) -> Result<(), InvalidId> {
+            Ok(())
+        }
     }
 
     fn offer(mime_types: &[&str]) -> DataOffer<FakeOffer> {
