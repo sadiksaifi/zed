@@ -1053,10 +1053,71 @@ impl Drop for X11Window {
     }
 }
 
+/// The action of a `_NET_WM_STATE` client message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WmHintPropertyState {
-    // Remove = 0,
-    // Add = 1,
+    Remove = 0,
+    Add = 1,
     Toggle = 2,
+}
+
+/// The axes along which a window asks to be maximized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MaximizeAxes {
+    Both,
+    Horizontal,
+    Vertical,
+}
+
+/// A change of the `_NET_WM_STATE_MAXIMIZED_HORZ` and `_NET_WM_STATE_MAXIMIZED_VERT` states.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MaximizeChange {
+    action: WmHintPropertyState,
+    horizontal: bool,
+    vertical: bool,
+}
+
+impl MaximizeAxes {
+    /// The change that toggles maximization along these axes for a window in the given state.
+    ///
+    /// A full maximize restores only a window maximized along both axes and otherwise maximizes
+    /// both, so a window maximized along one axis fills the screen instead of swapping axes.
+    fn toggle(self, maximized_horizontal: bool, maximized_vertical: bool) -> MaximizeChange {
+        let (horizontal, vertical, maximized) = match self {
+            Self::Both => (true, true, maximized_horizontal && maximized_vertical),
+            Self::Horizontal => (true, false, maximized_horizontal),
+            Self::Vertical => (false, true, maximized_vertical),
+        };
+        MaximizeChange {
+            action: if maximized {
+                WmHintPropertyState::Remove
+            } else {
+                WmHintPropertyState::Add
+            },
+            horizontal,
+            vertical,
+        }
+    }
+}
+
+/// The EWMH source indication of a request made by a normal application.
+const NET_WM_SOURCE_APPLICATION: u32 = 1;
+
+/// Builds the `_NET_WM_STATE` client message that changes up to two states of `window`.
+/// `second` is `NONE` when the message changes one state.
+fn net_wm_state_message(
+    window: xproto::Window,
+    net_wm_state: xproto::Atom,
+    action: WmHintPropertyState,
+    first: xproto::Atom,
+    second: xproto::Atom,
+) -> ClientMessageEvent {
+    ClientMessageEvent::new(
+        32,
+        window,
+        net_wm_state,
+        [action as u32, first, second, NET_WM_SOURCE_APPLICATION, 0],
+    )
 }
 
 impl X11Window {
@@ -1141,11 +1202,12 @@ impl X11Window {
         prop2: u32,
     ) -> anyhow::Result<()> {
         let state = self.0.state.borrow();
-        let message = ClientMessageEvent::new(
-            32,
+        let message = net_wm_state_message(
             self.0.x_window,
             state.atoms._NET_WM_STATE,
-            [wm_hint_property_state as u32, prop1, prop2, 1, 0],
+            wm_hint_property_state,
+            prop1,
+            prop2,
         );
         check_reply(
             failure_context,
@@ -1174,6 +1236,35 @@ impl X11Window {
                 (f32::from(position.y) * state.scale_factor) as i16,
             ),
         )
+    }
+
+    /// Asks the window manager to maximize this window along `axes`, or to restore it when it
+    /// is already maximized along them.
+    fn toggle_maximize(&self, axes: MaximizeAxes) {
+        let (change, horizontal_atom, vertical_atom) = {
+            let state = self.0.state.borrow();
+            if !state.size_limits.is_resizable {
+                return;
+            }
+            (
+                axes.toggle(state.maximized_horizontal, state.maximized_vertical),
+                state.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
+                state.atoms._NET_WM_STATE_MAXIMIZED_VERT,
+            )
+        };
+        let mut states = [horizontal_atom, vertical_atom]
+            .into_iter()
+            .zip([change.horizontal, change.vertical])
+            .filter_map(|(atom, changes)| changes.then_some(atom));
+        let first = states.next().unwrap_or(x11rb::NONE);
+        let second = states.next().unwrap_or(x11rb::NONE);
+        self.set_wm_hints(
+            || "X11 SendEvent to maximize a window failed.",
+            change.action,
+            first,
+            second,
+        )
+        .log_err();
     }
 
     /// Asks the window manager to move this window below its siblings.
@@ -1934,17 +2025,7 @@ impl PlatformWindow for X11Window {
     }
 
     fn zoom(&self) {
-        let state = self.0.state.borrow();
-        if !state.size_limits.is_resizable {
-            return;
-        }
-        self.set_wm_hints(
-            || "X11 SendEvent to maximize a window failed.",
-            WmHintPropertyState::Toggle,
-            state.atoms._NET_WM_STATE_MAXIMIZED_VERT,
-            state.atoms._NET_WM_STATE_MAXIMIZED_HORZ,
-        )
-        .log_err();
+        self.toggle_maximize(MaximizeAxes::Both);
     }
 
     fn toggle_fullscreen(&self) {
@@ -2090,6 +2171,12 @@ impl PlatformWindow for X11Window {
         };
         match action.for_window(is_resizable, is_minimizable) {
             TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
+            TitlebarDoubleClickAction::ToggleMaximizeHorizontally => {
+                self.toggle_maximize(MaximizeAxes::Horizontal)
+            }
+            TitlebarDoubleClickAction::ToggleMaximizeVertically => {
+                self.toggle_maximize(MaximizeAxes::Vertical)
+            }
             TitlebarDoubleClickAction::Minimize => self.minimize(),
             TitlebarDoubleClickAction::Menu => self.show_window_menu(position),
             TitlebarDoubleClickAction::Lower => self.lower(),
@@ -2378,7 +2465,10 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{SizeLimits, startup_notification_timestamp};
+    use super::{
+        MaximizeAxes, MaximizeChange, SizeLimits, WmHintPropertyState, net_wm_state_message,
+        startup_notification_timestamp,
+    };
     use gpui::{DevicePixels, Size, px, size};
 
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
@@ -2469,5 +2559,86 @@ mod tests {
             );
         }
         assert_eq!(startup_notification_timestamp("host_TIME4294967296"), None);
+    }
+
+    fn change(action: WmHintPropertyState, horizontal: bool, vertical: bool) -> MaximizeChange {
+        MaximizeChange {
+            action,
+            horizontal,
+            vertical,
+        }
+    }
+
+    #[test]
+    fn maximizing_along_one_axis_changes_only_that_axis() {
+        use WmHintPropertyState::{Add, Remove};
+
+        for vertical in [false, true] {
+            assert_eq!(
+                MaximizeAxes::Horizontal.toggle(false, vertical),
+                change(Add, true, false)
+            );
+            assert_eq!(
+                MaximizeAxes::Horizontal.toggle(true, vertical),
+                change(Remove, true, false)
+            );
+        }
+        for horizontal in [false, true] {
+            assert_eq!(
+                MaximizeAxes::Vertical.toggle(horizontal, false),
+                change(Add, false, true)
+            );
+            assert_eq!(
+                MaximizeAxes::Vertical.toggle(horizontal, true),
+                change(Remove, false, true)
+            );
+        }
+    }
+
+    #[test]
+    fn full_maximize_fills_both_axes_unless_both_are_maximized() {
+        use WmHintPropertyState::{Add, Remove};
+
+        assert_eq!(
+            MaximizeAxes::Both.toggle(false, false),
+            change(Add, true, true)
+        );
+        assert_eq!(
+            MaximizeAxes::Both.toggle(true, false),
+            change(Add, true, true)
+        );
+        assert_eq!(
+            MaximizeAxes::Both.toggle(false, true),
+            change(Add, true, true)
+        );
+        assert_eq!(
+            MaximizeAxes::Both.toggle(true, true),
+            change(Remove, true, true)
+        );
+    }
+
+    #[test]
+    fn net_wm_state_message_follows_ewmh() {
+        const WINDOW: u32 = 0x0420_0001;
+        const NET_WM_STATE: u32 = 301;
+        const MAXIMIZED_VERT: u32 = 302;
+
+        let message = net_wm_state_message(
+            WINDOW,
+            NET_WM_STATE,
+            WmHintPropertyState::Add,
+            MAXIMIZED_VERT,
+            x11rb::NONE,
+        );
+
+        assert_eq!(message.format, 32);
+        assert_eq!(message.window, WINDOW);
+        assert_eq!(message.type_, NET_WM_STATE);
+        assert_eq!(
+            message.data.as_data32(),
+            [1, MAXIMIZED_VERT, x11rb::NONE, 1, 0]
+        );
+        assert_eq!(WmHintPropertyState::Remove as u32, 0);
+        assert_eq!(WmHintPropertyState::Toggle as u32, 2);
     }
 }

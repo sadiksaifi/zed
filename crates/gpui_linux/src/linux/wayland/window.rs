@@ -2184,7 +2184,10 @@ impl PlatformWindow for WaylandWindow {
             is_resizable && controls.maximize,
             is_minimizable && controls.minimize,
         ) {
-            TitlebarDoubleClickAction::ToggleMaximize => self.zoom(),
+            // xdg-shell has no maximize along one axis.
+            TitlebarDoubleClickAction::ToggleMaximize
+            | TitlebarDoubleClickAction::ToggleMaximizeHorizontally
+            | TitlebarDoubleClickAction::ToggleMaximizeVertically => self.zoom(),
             TitlebarDoubleClickAction::Minimize => self.minimize(),
             TitlebarDoubleClickAction::Menu if controls.window_menu => {
                 self.show_window_menu(position)

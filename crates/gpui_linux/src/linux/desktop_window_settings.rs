@@ -120,6 +120,8 @@ fn kde_buttons(value: &str) -> [Option<WindowButton>; 3] {
 fn kde_action(value: &str) -> TitlebarDoubleClickAction {
     match value {
         "Maximize" => TitlebarDoubleClickAction::ToggleMaximize,
+        "Maximize (horizontal only)" => TitlebarDoubleClickAction::ToggleMaximizeHorizontally,
+        "Maximize (vertical only)" => TitlebarDoubleClickAction::ToggleMaximizeVertically,
         "Minimize" => TitlebarDoubleClickAction::Minimize,
         "Operations menu" => TitlebarDoubleClickAction::Menu,
         "Lower" => TitlebarDoubleClickAction::Lower,
@@ -215,6 +217,18 @@ mod tests {
             }
         );
         assert_eq!(kde_action("Shade"), TitlebarDoubleClickAction::None);
+    }
+
+    #[test]
+    fn kde_actions_keep_the_maximize_axis() {
+        assert_eq!(
+            kde_action("Maximize (horizontal only)"),
+            TitlebarDoubleClickAction::ToggleMaximizeHorizontally
+        );
+        assert_eq!(
+            kde_action("Maximize (vertical only)"),
+            TitlebarDoubleClickAction::ToggleMaximizeVertically
+        );
     }
 
     #[test]

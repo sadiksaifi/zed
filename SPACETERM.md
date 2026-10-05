@@ -75,6 +75,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `feat(gpui): drag files with their own icons`
 - `feat(gpui): drag files as a caller-drawn image`
 
+- `feat(gpui_linux): maximize X11 windows along one axis from titlebar actions`
+
 ## Monthly rebase
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.

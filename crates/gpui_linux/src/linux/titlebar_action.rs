@@ -7,6 +7,14 @@ pub(crate) enum TitlebarDoubleClickAction {
     /// Maximize the window, or restore it when it is maximized.
     #[default]
     ToggleMaximize,
+    /// Maximize the window's width only, or restore it when it is maximized horizontally.
+    ///
+    /// Platforms that cannot maximize along one axis maximize the whole window.
+    ToggleMaximizeHorizontally,
+    /// Maximize the window's height only, or restore it when it is maximized vertically.
+    ///
+    /// Platforms that cannot maximize along one axis maximize the whole window.
+    ToggleMaximizeVertically,
     /// Minimize the window.
     Minimize,
     /// Show the window menu at the pointer.
@@ -23,9 +31,9 @@ impl TitlebarDoubleClickAction {
     /// Actions GPUI cannot perform, such as shading, and unknown values do nothing.
     pub(crate) fn parse(value: &str) -> Self {
         match value.trim() {
-            "toggle-maximize" | "toggle-maximize-horizontally" | "toggle-maximize-vertically" => {
-                Self::ToggleMaximize
-            }
+            "toggle-maximize" => Self::ToggleMaximize,
+            "toggle-maximize-horizontally" => Self::ToggleMaximizeHorizontally,
+            "toggle-maximize-vertically" => Self::ToggleMaximizeVertically,
             "minimize" => Self::Minimize,
             "menu" => Self::Menu,
             "lower" => Self::Lower,
@@ -36,7 +44,13 @@ impl TitlebarDoubleClickAction {
     /// Returns the action to perform for a window, dropping actions the window does not allow.
     pub(crate) fn for_window(self, is_resizable: bool, is_minimizable: bool) -> Self {
         match self {
-            Self::ToggleMaximize if !is_resizable => Self::None,
+            Self::ToggleMaximize
+            | Self::ToggleMaximizeHorizontally
+            | Self::ToggleMaximizeVertically
+                if !is_resizable =>
+            {
+                Self::None
+            }
             Self::Minimize if !is_minimizable => Self::None,
             action => action,
         }
@@ -53,11 +67,11 @@ mod tests {
             ("toggle-maximize", TitlebarDoubleClickAction::ToggleMaximize),
             (
                 "toggle-maximize-horizontally",
-                TitlebarDoubleClickAction::ToggleMaximize,
+                TitlebarDoubleClickAction::ToggleMaximizeHorizontally,
             ),
             (
                 "toggle-maximize-vertically",
-                TitlebarDoubleClickAction::ToggleMaximize,
+                TitlebarDoubleClickAction::ToggleMaximizeVertically,
             ),
             ("minimize", TitlebarDoubleClickAction::Minimize),
             ("menu", TitlebarDoubleClickAction::Menu),
@@ -93,8 +107,14 @@ mod tests {
     fn drops_actions_the_window_does_not_allow() {
         use TitlebarDoubleClickAction::*;
 
-        assert_eq!(ToggleMaximize.for_window(false, true), None);
-        assert_eq!(ToggleMaximize.for_window(true, false), ToggleMaximize);
+        for action in [
+            ToggleMaximize,
+            ToggleMaximizeHorizontally,
+            ToggleMaximizeVertically,
+        ] {
+            assert_eq!(action.for_window(false, true), None);
+            assert_eq!(action.for_window(true, false), action);
+        }
         assert_eq!(Minimize.for_window(true, false), None);
         assert_eq!(Minimize.for_window(false, true), Minimize);
         for action in [Menu, Lower, None] {
