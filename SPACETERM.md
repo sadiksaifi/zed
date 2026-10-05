@@ -108,10 +108,11 @@ Windows cross check:
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
-PATH="/opt/homebrew/opt/llvm@21/bin:$PATH" cargo clippy -p gpui_windows --target x86_64-pc-windows-msvc
+mise x conda:llvm-tools@21.1.8 -- cargo clippy -p gpui_windows --target x86_64-pc-windows-msvc
 ```
 
-The `gpui` build script needs `llvm-rc` from LLVM 21 for the Windows check.
+The `gpui` build script needs `llvm-rc` from LLVM 21 for the Windows check; mise provides it from
+conda-forge's `llvm-tools`.
 
 Linux check, with the Wayland and X11 development libraries installed:
 
