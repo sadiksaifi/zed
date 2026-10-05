@@ -77,6 +77,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 - `feat(gpui_linux): maximize X11 windows along one axis from titlebar actions`
 - `fix(gpui_linux): redraw X11 windows at each size during interactive resize`
+- `feat(gpui_linux): blur X11 window backgrounds under KWin`
 
 ## Monthly rebase
 

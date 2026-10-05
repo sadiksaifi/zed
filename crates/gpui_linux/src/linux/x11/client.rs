@@ -210,6 +210,8 @@ pub struct X11ClientState {
     pub(crate) xcb_connection: Rc<XCBConnection>,
     xkb_device_id: i32,
     compositor_present: bool,
+    /// Whether the compositor blurs behind windows that set `_KDE_NET_WM_BLUR_BEHIND_REGION`.
+    blur_behind_supported: bool,
     transparent_client_frame_supported: bool,
     pub(crate) x_root_index: usize,
     pub(crate) resource_database: Database,
@@ -420,11 +422,14 @@ impl X11Client {
         let compositor_present = check_compositor_present(&xcb_connection, root);
         let gtk_frame_extents_supported =
             check_gtk_frame_extents_supported(&xcb_connection, &atoms, root);
+        let blur_behind_supported =
+            compositor_present && check_blur_behind_supported(&xcb_connection, &atoms, root);
         let transparent_client_frame_supported = compositor_present;
         log::info!(
-            "x11: compositor present: {}, gtk_frame_extents_supported: {}",
+            "x11: compositor present: {}, gtk_frame_extents_supported: {}, blur_behind_supported: {}",
             compositor_present,
-            gtk_frame_extents_supported
+            gtk_frame_extents_supported,
+            blur_behind_supported
         );
 
         let xkb = get_reply(
@@ -583,6 +588,7 @@ impl X11Client {
             xcb_connection,
             xkb_device_id,
             compositor_present,
+            blur_behind_supported,
             transparent_client_frame_supported,
             x_root_index,
             resource_database,
@@ -1628,10 +1634,11 @@ impl LinuxClient for X11Client {
 
     fn window_background_support(&self) -> WindowBackgroundSupport {
         // Without a compositing manager, the X server draws transparent pixels as black.
-        // No X11 compositor offers a standard blur request.
+        // X11 has no standard blur request; KWin offers its own.
+        let state = self.0.borrow();
         WindowBackgroundSupport {
-            transparent: self.0.borrow().compositor_present,
-            blurred: false,
+            transparent: state.compositor_present,
+            blurred: state.blur_behind_supported,
         }
     }
 
@@ -2486,6 +2493,22 @@ fn check_gtk_frame_extents_supported(
         .collect();
 
     supported_atom_ids.contains(&atoms._GTK_FRAME_EXTENTS)
+}
+
+/// Whether the compositor blurs behind windows that ask for it with
+/// `_KDE_NET_WM_BLUR_BEHIND_REGION`. KWin announces its blur effect by setting a root window
+/// property of that name, and removes it when the effect is unavailable.
+fn check_blur_behind_supported(
+    xcb_connection: &XCBConnection,
+    atoms: &XcbAtoms,
+    root: xproto::Window,
+) -> bool {
+    get_reply(
+        || "Failed to list root window properties",
+        xcb_connection.list_properties(root),
+    )
+    .log_with_level(Level::Debug)
+    .is_some_and(|reply| reply.atoms.contains(&atoms._KDE_NET_WM_BLUR_BEHIND_REGION))
 }
 
 fn xdnd_is_atom_supported(atom: u32, atoms: &XcbAtoms) -> bool {

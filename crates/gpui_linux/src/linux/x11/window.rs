@@ -92,6 +92,7 @@ x11rb::atom_manager! {
         _GTK_FRAME_EXTENTS,
         _GTK_EDGE_CONSTRAINTS,
         _NET_CLIENT_LIST_STACKING,
+        _KDE_NET_WM_BLUR_BEHIND_REGION,
     }
 }
 
@@ -1145,6 +1146,16 @@ impl MaximizeAxes {
     }
 }
 
+/// Whether the blur behind a window must be requested (`Some(true)`) or withdrawn
+/// (`Some(false)`) when its background changes from `old` to `new`.
+fn blur_behind_change(
+    old: WindowBackgroundAppearance,
+    new: WindowBackgroundAppearance,
+) -> Option<bool> {
+    let blurred = new == WindowBackgroundAppearance::Blurred;
+    ((old == WindowBackgroundAppearance::Blurred) != blurred).then_some(blurred)
+}
+
 /// The EWMH source indication of a request made by a normal application.
 const NET_WM_SOURCE_APPLICATION: u32 = 1;
 
@@ -1310,6 +1321,34 @@ impl X11Window {
             second,
         )
         .log_err();
+    }
+
+    /// Asks a compositor that blurs behind windows, such as KWin, to blur behind the whole
+    /// window, or to stop. Other window managers ignore the property.
+    fn set_blur_behind(&self, blur_behind_region: xproto::Atom, blurred: bool) {
+        if blurred {
+            // An empty region covers the whole window.
+            check_reply(
+                || "X11 ChangeProperty32 setting blur behind failed.",
+                self.0.xcb.change_property32(
+                    xproto::PropMode::REPLACE,
+                    self.0.x_window,
+                    blur_behind_region,
+                    xproto::AtomEnum::CARDINAL,
+                    &[],
+                ),
+            )
+            .log_err();
+        } else {
+            check_reply(
+                || "X11 DeleteProperty clearing blur behind failed.",
+                self.0
+                    .xcb
+                    .delete_property(self.0.x_window, blur_behind_region),
+            )
+            .log_err();
+        }
+        xcb_flush(&self.0.xcb);
     }
 
     /// Asks the window manager to move this window below its siblings.
@@ -2042,9 +2081,15 @@ impl PlatformWindow for X11Window {
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
+        let blur_behind = blur_behind_change(state.background_appearance, background_appearance);
         state.background_appearance = background_appearance;
         let transparent = state.is_transparent();
         state.renderer.update_transparency(transparent);
+        let blur_behind_region = state.atoms._KDE_NET_WM_BLUR_BEHIND_REGION;
+        drop(state);
+        if let Some(blurred) = blur_behind {
+            self.set_blur_behind(blur_behind_region, blurred);
+        }
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -2538,9 +2583,10 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
 mod tests {
     use super::{
         MaximizeAxes, MaximizeChange, SizeLimits, SyncRequest, WmHintPropertyState,
-        net_wm_state_message, startup_notification_timestamp, sync_counter_value,
+        blur_behind_change, net_wm_state_message, startup_notification_timestamp,
+        sync_counter_value,
     };
-    use gpui::{DevicePixels, Size, px, size};
+    use gpui::{DevicePixels, Size, WindowBackgroundAppearance, px, size};
 
     fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
         size(DevicePixels(width), DevicePixels(height))
@@ -2766,5 +2812,20 @@ mod tests {
             let counter = sync_counter_value(value);
             assert_eq!((counter.lo, counter.hi as u32), (low, high));
         }
+    }
+
+    #[test]
+    fn blur_behind_follows_the_blurred_background_only() {
+        use WindowBackgroundAppearance::{
+            Blurred, MicaAltBackdrop, MicaBackdrop, Opaque, Transparent,
+        };
+
+        for other in [Opaque, Transparent, MicaBackdrop, MicaAltBackdrop] {
+            assert_eq!(blur_behind_change(other, Blurred), Some(true), "{other:?}");
+            assert_eq!(blur_behind_change(Blurred, other), Some(false), "{other:?}");
+            assert_eq!(blur_behind_change(other, other), None, "{other:?}");
+        }
+        assert_eq!(blur_behind_change(Blurred, Blurred), None);
+        assert_eq!(blur_behind_change(Opaque, Transparent), None);
     }
 }
