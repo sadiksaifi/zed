@@ -1,7 +1,7 @@
 //! The XKB facts behind a key event that GPUI's portable keystrokes leave out, shared by the
 //! Wayland and X11 clients.
 
-use gpui::{Capslock, Modifiers, ModifiersChangedEvent, NativeKeyEvent};
+use gpui::{Capslock, ModifierRole, Modifiers, ModifiersChangedEvent, NativeKeyEvent};
 use xkbcommon::xkb::{self, KeyDirection, Keycode, Keysym};
 
 /// XKB keycodes are evdev scancodes offset by 8.
@@ -36,6 +36,7 @@ pub(super) fn native_key_event(state: &xkb::State, keycode: Keycode) -> NativeKe
         caps_lock: state.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE),
         num_lock: state.mod_name_is_active(xkb::MOD_NAME_NUM, xkb::STATE_MODS_EFFECTIVE),
         modifier_key: None,
+        modifier_role: None,
     }
 }
 
@@ -61,7 +62,63 @@ pub(super) fn modifier_key_event(
         caps_lock: after.mod_name_is_active(xkb::MOD_NAME_CAPS, xkb::STATE_MODS_EFFECTIVE),
         num_lock: after.mod_name_is_active(xkb::MOD_NAME_NUM, xkb::STATE_MODS_EFFECTIVE),
         modifier_key: Some((scancode, pressed)),
+        modifier_role: modifier_role(state, keycode),
     }
+}
+
+/// The modifier key `keycode` acts as in `state`'s layout. XKB options can bind a modifier to any
+/// key, and the keysym need not name it: `caps:ctrl_modifier` keeps `Caps_Lock` but sets Control.
+/// So the single portable modifier the key sets while held decides the role, and the keysym
+/// decides its side. A key that sets none can still name a lock.
+fn modifier_role(state: &xkb::State, keycode: Keycode) -> Option<ModifierRole> {
+    let held = modifiers_from_mask(
+        &state.get_keymap(),
+        modifiers_set_while_held(state, std::iter::once(keycode)),
+    );
+    let keysym = state.key_get_one_sym(keycode);
+    let right = matches!(
+        keysym,
+        Keysym::Shift_R
+            | Keysym::Control_R
+            | Keysym::Alt_R
+            | Keysym::Meta_R
+            | Keysym::Super_R
+            | Keysym::Hyper_R
+    );
+    let sided = |left, right_role| Some(if right { right_role } else { left });
+    match (held.shift, held.control, held.alt, held.platform) {
+        (true, false, false, false) => sided(ModifierRole::ShiftLeft, ModifierRole::ShiftRight),
+        (false, true, false, false) => sided(ModifierRole::ControlLeft, ModifierRole::ControlRight),
+        (false, false, true, false) => sided(ModifierRole::AltLeft, ModifierRole::AltRight),
+        (false, false, false, true) => {
+            sided(ModifierRole::PlatformLeft, ModifierRole::PlatformRight)
+        }
+        _ => match keysym {
+            Keysym::Caps_Lock => Some(ModifierRole::CapsLock),
+            Keysym::Num_Lock => Some(ModifierRole::NumLock),
+            _ => None,
+        },
+    }
+}
+
+/// The modifiers that holding `keys` alone sets in the layout active in `state`.
+fn modifiers_set_while_held(
+    state: &xkb::State,
+    keys: impl Iterator<Item = Keycode>,
+) -> xkb::ModMask {
+    let mut held = xkb::State::new(&state.get_keymap());
+    held.update_mask(
+        0,
+        0,
+        0,
+        0,
+        0,
+        state.serialize_layout(xkb::STATE_LAYOUT_EFFECTIVE),
+    );
+    for key in keys {
+        held.update_key(key, KeyDirection::Down);
+    }
+    held.serialize_mods(xkb::STATE_MODS_DEPRESSED)
 }
 
 /// The modifiers-changed event that carries a modifier key's [`modifier_key_event`].
@@ -83,14 +140,9 @@ fn state_after_modifier_key(
     let keymap = state.get_keymap();
     let mut depressed_mods = state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
     if !pressed {
-        let mut key_alone = xkb::State::new(&keymap);
-        key_alone.update_key(keycode, KeyDirection::Down);
-        let released_mods = key_alone.serialize_mods(xkb::STATE_MODS_DEPRESSED);
-        let mut held_state = xkb::State::new(&keymap);
-        for held_key in held_keys.filter(|&held_key| held_key != keycode) {
-            held_state.update_key(held_key, KeyDirection::Down);
-        }
-        let held_mods = held_state.serialize_mods(xkb::STATE_MODS_DEPRESSED);
+        let released_mods = modifiers_set_while_held(state, std::iter::once(keycode));
+        let held_mods =
+            modifiers_set_while_held(state, held_keys.filter(|&held_key| held_key != keycode));
         // The aggregate mask has no press counts. Releasing one Shift/Control/Alt key
         // must not clear the bit while another physical key still contributes it.
         depressed_mods &= !(released_mods & !held_mods);
@@ -310,6 +362,90 @@ mod tests {
         assert_eq!(pressed.scancode, 58);
         assert!(pressed.caps_lock);
         assert!(modifier_key_changed_event(&pressed).capslock.on);
+    }
+
+    fn role(keymap: &xkb::Keymap, name: &str) -> Option<ModifierRole> {
+        let state = xkb::State::new(keymap);
+        let native = modifier_key_event(&state, key(keymap, name), true, std::iter::empty());
+        native.modifier_role
+    }
+
+    #[test]
+    fn modifier_keys_report_their_usual_roles() {
+        let us = keymap("us", None);
+        for (name, expected) in [
+            ("LFSH", Some(ModifierRole::ShiftLeft)),
+            ("RTSH", Some(ModifierRole::ShiftRight)),
+            ("LCTL", Some(ModifierRole::ControlLeft)),
+            ("RCTL", Some(ModifierRole::ControlRight)),
+            ("LALT", Some(ModifierRole::AltLeft)),
+            ("RALT", Some(ModifierRole::AltRight)),
+            ("LWIN", Some(ModifierRole::PlatformLeft)),
+            ("RWIN", Some(ModifierRole::PlatformRight)),
+            ("CAPS", Some(ModifierRole::CapsLock)),
+            ("NMLK", Some(ModifierRole::NumLock)),
+        ] {
+            assert_eq!(role(&us, name), expected, "{name}");
+        }
+        // AltGr shifts levels and acts as no portable modifier key.
+        assert_eq!(role(&keymap("de", None), "RALT"), None);
+        let state = xkb::State::new(&us);
+        assert_eq!(
+            native_key_event(&state, key(&us, "AC01")).modifier_role,
+            None
+        );
+    }
+
+    #[test]
+    fn remapped_modifier_keys_report_the_role_the_keymap_gives_them() {
+        for (options, name, expected) in [
+            // The keysym stays Caps_Lock while the key sets Control.
+            ("caps:ctrl_modifier", "CAPS", ModifierRole::ControlLeft),
+            ("ctrl:nocaps", "CAPS", ModifierRole::ControlLeft),
+            ("ctrl:swapcaps", "CAPS", ModifierRole::ControlLeft),
+            ("ctrl:swapcaps", "LCTL", ModifierRole::CapsLock),
+            ("ctrl:swap_lalt_lctl", "LALT", ModifierRole::ControlLeft),
+            ("ctrl:swap_lalt_lctl", "LCTL", ModifierRole::AltLeft),
+            ("ctrl:swap_ralt_rctl", "RALT", ModifierRole::ControlRight),
+            ("ctrl:swap_ralt_rctl", "RCTL", ModifierRole::AltRight),
+            ("altwin:swap_alt_win", "LALT", ModifierRole::PlatformLeft),
+            ("altwin:swap_alt_win", "LWIN", ModifierRole::AltLeft),
+        ] {
+            let keymap = keymap("us", Some(options));
+            assert_eq!(role(&keymap, name), Some(expected), "{options} {name}");
+        }
+    }
+
+    #[test]
+    fn caps_lock_as_control_sets_and_releases_control() {
+        let keymap = keymap("us", Some("caps:ctrl_modifier"));
+        let caps = key(&keymap, "CAPS");
+        let left_control = key(&keymap, "LCTL");
+        let mut state = xkb::State::new(&keymap);
+
+        let pressed = modifier_key_event(&state, caps, true, std::iter::empty());
+        assert_eq!(pressed.modifier_key, Some((58, true)));
+        assert_eq!(pressed.modifiers, Modifiers::control());
+        assert!(!pressed.caps_lock);
+        press(&mut state, caps);
+        // Shortcuts and terminal input see Control+C.
+        let c = key(&keymap, "AB03");
+        assert_eq!(native_key_event(&state, c).modifiers, Modifiers::control());
+        let modifiers = crate::linux::modifiers_from_xkb(&state);
+        assert_eq!(modifiers, Modifiers::control());
+        let keystroke = crate::linux::keystroke_from_xkb(&state, modifiers, c);
+        assert_eq!(keystroke.key, "c");
+        assert_eq!(keystroke.modifiers, Modifiers::control());
+        press(&mut state, left_control);
+
+        // Control stays set while the ordinary Control key still holds it.
+        let released = modifier_key_event(&state, caps, false, [left_control].into_iter());
+        assert_eq!(released.modifier_role, Some(ModifierRole::ControlLeft));
+        assert_eq!(released.modifiers, Modifiers::control());
+        release(&mut state, caps);
+        let released = modifier_key_event(&state, left_control, false, std::iter::empty());
+        assert_eq!(released.modifiers, Modifiers::none());
+        assert!(!released.caps_lock);
     }
 
     #[test]

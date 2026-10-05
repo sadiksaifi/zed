@@ -106,6 +106,36 @@ pub struct NativeKeyEvent {
     /// reported as [`ModifiersChangedEvent`]s whose modifiers already include the transition.
     /// `None` for other keys and for aggregate modifier state changes.
     pub modifier_key: Option<(u16, bool)>,
+    /// For a modifier key's own press or release, the modifier key the active keymap makes it
+    /// act as, which keymap options can move to another physical key. For example, XKB's
+    /// `caps:ctrl_modifier` makes Caps Lock act as left Control. `None` for other keys and for
+    /// modifier keys without such a role, such as AltGr.
+    pub modifier_role: Option<ModifierRole>,
+}
+
+/// The modifier key that a physical key acts as in the active keymap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModifierRole {
+    /// The left Shift key.
+    ShiftLeft,
+    /// The right Shift key.
+    ShiftRight,
+    /// The left Control key.
+    ControlLeft,
+    /// The right Control key.
+    ControlRight,
+    /// The left Alt key.
+    AltLeft,
+    /// The right Alt key.
+    AltRight,
+    /// The left platform key (Super or Windows).
+    PlatformLeft,
+    /// The right platform key (Super or Windows).
+    PlatformRight,
+    /// The Caps Lock key.
+    CapsLock,
+    /// The Num Lock key.
+    NumLock,
 }
 
 /// The phase of a touch motion event.
