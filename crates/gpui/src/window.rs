@@ -10490,6 +10490,42 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_accessibility_disabled_and_modal_states(cx: &mut TestAppContext) {
+        struct DialogView;
+
+        impl Render for DialogView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .id("dialog")
+                        .role(accesskit::Role::Dialog)
+                        .aria_label("Dialog")
+                        .aria_modal(true)
+                        .size(px(10.))
+                        .child(
+                            div()
+                                .id("unavailable")
+                                .role(accesskit::Role::Button)
+                                .aria_label("Unavailable")
+                                .aria_disabled(true)
+                                .size(px(10.)),
+                        ),
+                )
+            }
+        }
+
+        let window: AnyWindowHandle = cx.add_window(|_, _| DialogView).into();
+        cx.activate_accessibility(window);
+        let dialog = a11y_node(window, cx, "Dialog");
+        assert_eq!(dialog["aria"]["modal"], true);
+        assert!(dialog["aria"]["disabled"].is_null());
+        assert_eq!(
+            a11y_node(window, cx, "Unavailable")["aria"]["disabled"],
+            true
+        );
+    }
+
+    #[gpui::test]
     #[should_panic(expected = "accessibility is disabled for this window")]
     fn test_accessibility_activation_requires_accessibility(cx: &mut TestAppContext) {
         cx.disable_accessibility();

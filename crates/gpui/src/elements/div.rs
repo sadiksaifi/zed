@@ -1390,6 +1390,20 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set whether this element is disabled. Assistive technology reports a
+    /// disabled element as present but unavailable.
+    fn aria_disabled(mut self, disabled: bool) -> Self {
+        self.interactivity().aria.disabled = disabled;
+        self
+    }
+
+    /// Mark this element as modal: assistive technology confines navigation to
+    /// it while it is presented.
+    fn aria_modal(mut self, modal: bool) -> Self {
+        self.interactivity().aria.modal = modal;
+        self
+    }
+
     /// Set the expanded state for this element.
     fn aria_expanded(mut self, expanded: bool) -> Self {
         self.interactivity().aria.expanded = Some(expanded);
@@ -2103,6 +2117,8 @@ pub(crate) struct AriaProperties {
     pub(crate) description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
     pub(crate) selected: Option<bool>,
+    pub(crate) disabled: bool,
+    pub(crate) modal: bool,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
     pub(crate) numeric_value: Option<f64>,
@@ -3536,6 +3552,12 @@ impl Interactivity {
         }
         if let Some(selected) = self.aria.selected {
             node.set_selected(selected);
+        }
+        if self.aria.disabled {
+            node.set_disabled();
+        }
+        if self.aria.modal {
+            node.set_modal();
         }
         if let Some(expanded) = self.aria.expanded {
             node.set_expanded(expanded);
