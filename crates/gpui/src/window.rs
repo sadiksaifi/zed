@@ -10606,6 +10606,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_accessibility_hidden_state(cx: &mut TestAppContext) {
+        struct UnderlayView;
+
+        impl Render for UnderlayView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(
+                        div()
+                            .id("underlay")
+                            .role(accesskit::Role::Group)
+                            .aria_label("Underlay")
+                            .aria_hidden(true)
+                            .size(px(10.)),
+                    )
+                    .child(
+                        div()
+                            .id("dialog")
+                            .role(accesskit::Role::Dialog)
+                            .aria_label("Dialog")
+                            .size(px(10.)),
+                    )
+            }
+        }
+
+        let window: AnyWindowHandle = cx.add_window(|_, _| UnderlayView).into();
+        cx.activate_accessibility(window);
+        assert_eq!(a11y_node(window, cx, "Underlay")["aria"]["hidden"], true);
+        assert!(a11y_node(window, cx, "Dialog")["aria"]["hidden"].is_null());
+    }
+
+    #[gpui::test]
     #[should_panic(expected = "accessibility is disabled for this window")]
     fn test_accessibility_activation_requires_accessibility(cx: &mut TestAppContext) {
         cx.disable_accessibility();

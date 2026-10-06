@@ -1412,6 +1412,13 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set whether assistive technology omits this element and its
+    /// descendants, such as content beneath a modal dialog.
+    fn aria_hidden(mut self, hidden: bool) -> Self {
+        self.interactivity().aria.hidden = hidden;
+        self
+    }
+
     /// Set the expanded state for this element.
     fn aria_expanded(mut self, expanded: bool) -> Self {
         self.interactivity().aria.expanded = Some(expanded);
@@ -2128,6 +2135,7 @@ pub(crate) struct AriaProperties {
     pub(crate) disabled: bool,
     pub(crate) modal: bool,
     pub(crate) read_only: bool,
+    pub(crate) hidden: bool,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
     pub(crate) numeric_value: Option<f64>,
@@ -3570,6 +3578,9 @@ impl Interactivity {
         }
         if self.aria.read_only {
             node.set_read_only();
+        }
+        if self.aria.hidden {
+            node.set_hidden();
         }
         if let Some(expanded) = self.aria.expanded {
             node.set_expanded(expanded);
