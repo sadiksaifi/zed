@@ -10526,6 +10526,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_accessibility_read_only_state(cx: &mut TestAppContext) {
+        struct FieldView;
+
+        impl Render for FieldView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .child(
+                        div()
+                            .id("locked")
+                            .role(accesskit::Role::TextInput)
+                            .aria_label("Locked")
+                            .aria_read_only(true)
+                            .size(px(10.)),
+                    )
+                    .child(
+                        div()
+                            .id("editable")
+                            .role(accesskit::Role::TextInput)
+                            .aria_label("Editable")
+                            .size(px(10.)),
+                    )
+            }
+        }
+
+        let window: AnyWindowHandle = cx.add_window(|_, _| FieldView).into();
+        cx.activate_accessibility(window);
+        assert_eq!(a11y_node(window, cx, "Locked")["aria"]["read_only"], true);
+        assert!(a11y_node(window, cx, "Editable")["aria"]["read_only"].is_null());
+    }
+
+    #[gpui::test]
     #[should_panic(expected = "accessibility is disabled for this window")]
     fn test_accessibility_activation_requires_accessibility(cx: &mut TestAppContext) {
         cx.disable_accessibility();

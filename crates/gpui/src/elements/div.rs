@@ -1404,6 +1404,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set whether this element's value is read-only. Assistive technology
+    /// reports a read-only text input as readable and selectable but not
+    /// editable.
+    fn aria_read_only(mut self, read_only: bool) -> Self {
+        self.interactivity().aria.read_only = read_only;
+        self
+    }
+
     /// Set the expanded state for this element.
     fn aria_expanded(mut self, expanded: bool) -> Self {
         self.interactivity().aria.expanded = Some(expanded);
@@ -2119,6 +2127,7 @@ pub(crate) struct AriaProperties {
     pub(crate) selected: Option<bool>,
     pub(crate) disabled: bool,
     pub(crate) modal: bool,
+    pub(crate) read_only: bool,
     pub(crate) expanded: Option<bool>,
     pub(crate) toggled: Option<accesskit::Toggled>,
     pub(crate) numeric_value: Option<f64>,
@@ -3558,6 +3567,9 @@ impl Interactivity {
         }
         if self.aria.modal {
             node.set_modal();
+        }
+        if self.aria.read_only {
+            node.set_read_only();
         }
         if let Some(expanded) = self.aria.expanded {
             node.set_expanded(expanded);

@@ -337,6 +337,9 @@ fn node_to_json(
     if node.is_modal() {
         aria.insert("modal".into(), json!(true));
     }
+    if node.is_read_only() {
+        aria.insert("read_only".into(), json!(true));
+    }
     if node.is_hidden() {
         aria.insert("hidden".into(), json!(true));
     }
