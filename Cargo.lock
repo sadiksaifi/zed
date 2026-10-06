@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accesskit"
 version = "0.24.1"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06#755d62e2c85226bad4203cb4ec4097d5517ab64f"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06.1#e1688544feb1cd42ea99aacf1dd844dfdb085dc2"
 dependencies = [
  "enumn",
  "uuid",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "accesskit_atspi_common"
 version = "0.19.1"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06#755d62e2c85226bad4203cb4ec4097d5517ab64f"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06.1#e1688544feb1cd42ea99aacf1dd844dfdb085dc2"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -27,7 +27,7 @@ dependencies = [
 [[package]]
 name = "accesskit_consumer"
 version = "0.38.0"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06#755d62e2c85226bad4203cb4ec4097d5517ab64f"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06.1#e1688544feb1cd42ea99aacf1dd844dfdb085dc2"
 dependencies = [
  "accesskit",
  "hashbrown 0.16.1",
@@ -36,7 +36,7 @@ dependencies = [
 [[package]]
 name = "accesskit_macos"
 version = "0.26.3"
-source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06#755d62e2c85226bad4203cb4ec4097d5517ab64f"
+source = "git+https://github.com/sadiksaifi/accesskit?tag=spaceterm-2026-10-06.1#e1688544feb1cd42ea99aacf1dd844dfdb085dc2"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -5930,7 +5930,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7121,7 +7121,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -15827,7 +15827,7 @@ dependencies = [
  "errno 0.3.14",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -15925,7 +15925,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -18270,7 +18270,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -19172,7 +19172,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fb391ac70462b3097a755618fbf9c8f95ecc1eb379a414f7b46f202ed10db1f"
 dependencies = [
  "cc",
- "windows-targets 0.52.6",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
