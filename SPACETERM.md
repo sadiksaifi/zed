@@ -85,6 +85,12 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 - `fix(gpui_linux): answer owned X11 selections from retained contents only`
 - `fix(gpui_linux): request Wayland offers before their transfer runs`
 
+- `feat(gpui): attach native accessibility elements to nodes`
+- `feat(gpui): report disabled and modal accessibility states`
+- `feat(gpui): report read-only accessibility state`
+- `feat(gpui): report text selection in the debug accessibility tree`
+- `feat(gpui): report hidden accessibility state`
+
 ## Monthly rebase
 
 1. Fetch upstream main with `git fetch upstream main` and rebase the `spaceterm` branch with `git rebase upstream/main`.
