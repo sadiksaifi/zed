@@ -10526,6 +10526,54 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_accessibility_debug_tree_reports_text_selection(cx: &mut TestAppContext) {
+        struct FieldView;
+
+        impl Render for FieldView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div()
+                        .id("field")
+                        .role(accesskit::Role::TextInput)
+                        .aria_label("Field")
+                        .size(px(10.))
+                        .a11y_synthetic_children(|builder| {
+                            let run_id = builder.synthetic_node_id("run");
+                            let mut run = accesskit::Node::new(accesskit::Role::TextRun);
+                            run.set_value("ab");
+                            run.set_character_lengths([1, 1]);
+                            builder.push_child(run_id, run);
+                            builder
+                                .parent_node()
+                                .set_text_selection(accesskit::TextSelection {
+                                    anchor: accesskit::TextPosition {
+                                        node: run_id,
+                                        character_index: 0,
+                                    },
+                                    focus: accesskit::TextPosition {
+                                        node: run_id,
+                                        character_index: 2,
+                                    },
+                                });
+                        }),
+                )
+            }
+        }
+
+        let window: AnyWindowHandle = cx.add_window(|_, _| FieldView).into();
+        cx.activate_accessibility(window);
+        let field = a11y_node(window, cx, "Field");
+        let run = field["children"][0].clone();
+        assert_eq!(
+            field["aria"]["text_selection"],
+            serde_json::json!({
+                "anchor": { "node": run, "character_index": 0 },
+                "focus": { "node": run, "character_index": 2 },
+            })
+        );
+    }
+
+    #[gpui::test]
     fn test_accessibility_read_only_state(cx: &mut TestAppContext) {
         struct FieldView;
 

@@ -355,6 +355,19 @@ fn node_to_json(
     if let Some(v) = node.orientation() {
         aria.insert("orientation".into(), json!(format!("{v:?}")));
     }
+    if let Some(selection) = node.text_selection() {
+        let position = |position: accesskit::TextPosition| {
+            let node = ephemeral
+                .get(&position.node)
+                .cloned()
+                .unwrap_or_else(|| position.node.0.to_string());
+            json!({ "node": node, "character_index": position.character_index })
+        };
+        aria.insert(
+            "text_selection".into(),
+            json!({ "anchor": position(selection.anchor), "focus": position(selection.focus) }),
+        );
+    }
 
     // Numeric properties.
     if let Some(v) = node.numeric_value() {
