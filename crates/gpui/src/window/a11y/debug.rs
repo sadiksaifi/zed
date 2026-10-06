@@ -59,6 +59,8 @@ pub(crate) struct A11yDebug {
     retained_nodes: FxHashMap<NodeId, accesskit::Node>,
     last_gpui_focus: Option<NodeId>,
     last_active_descendant: Option<NodeId>,
+    /// The number of native elements attached to each node in the last frame.
+    native_children: FxHashMap<NodeId, usize>,
     /// Monotonic counter incremented on each captured frame, so a re-dump makes
     /// it obvious whether the tree actually refreshed.
     frame_number: u64,
@@ -128,6 +130,16 @@ impl A11yDebug {
         });
     }
 
+    pub(crate) fn capture_native_children(
+        &mut self,
+        native_children: &super::NativeAccessibilityChildren,
+    ) {
+        self.native_children = native_children
+            .iter()
+            .map(|(id, elements)| (*id, elements.len()))
+            .collect();
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn capture_node_info(&mut self, node_info: &FxHashMap<NodeId, NodeDebugInfo>) {
         self.last_node_info
@@ -183,7 +195,11 @@ impl A11yDebug {
                 .unwrap_or_default();
             #[cfg(not(debug_assertions))]
             let provenance = NodeProvenance::default();
-            let value = node_to_json(*id, node, &ephemeral, &provenance);
+            let mut value = node_to_json(*id, node, &ephemeral, &provenance);
+            if let (Some(count), Some(map)) = (self.native_children.get(id), value.as_object_mut())
+            {
+                map.insert("native_children".into(), serde_json::json!(count));
+            }
             nodes.insert(key, value);
         }
 

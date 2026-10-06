@@ -1211,6 +1211,10 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     /// Provide a TreeUpdate to the accessibility adapter.
     fn a11y_tree_update(&self, _tree_update: accesskit::TreeUpdate) {}
 
+    /// Replace the native elements attached to nodes of the last tree update.
+    /// See [`crate::A11ySubtreeBuilder::attach_native_children`].
+    fn a11y_set_native_children(&self, _children: crate::NativeAccessibilityChildren) {}
+
     /// Inform the adapter of updated window bounds.
     fn a11y_update_window_bounds(&self) {}
 

@@ -115,6 +115,54 @@ use std::sync::{
 /// The fixed AccessKit node ID used for the root of every window's a11y tree.
 pub(crate) const ROOT_NODE_ID: NodeId = NodeId(0);
 
+/// A platform accessibility object owned outside GPUI's AccessKit tree.
+///
+/// [`A11ySubtreeBuilder::attach_native_children`] presents such objects as the
+/// trailing children of an element's node, for content that a platform adapter
+/// publishes through the native accessibility API directly. The macOS adapter
+/// accepts `NSObject`s implementing `NSAccessibility`. Other platforms ignore
+/// native children.
+#[derive(Clone)]
+pub struct NativeAccessibilityElement {
+    pointer: std::ptr::NonNull<std::ffi::c_void>,
+    _owner: std::rc::Rc<dyn std::any::Any>,
+}
+
+impl NativeAccessibilityElement {
+    /// Wraps a platform accessibility object.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` must remain a valid platform accessibility object while
+    /// `owner` is alive. On macOS, it must point to an `NSObject` implementing
+    /// the `NSAccessibility` protocol, and it is only used on the main thread.
+    pub unsafe fn new(
+        pointer: std::ptr::NonNull<std::ffi::c_void>,
+        owner: std::rc::Rc<dyn std::any::Any>,
+    ) -> Self {
+        Self {
+            pointer,
+            _owner: owner,
+        }
+    }
+
+    /// The wrapped platform object.
+    pub fn as_ptr(&self) -> *mut std::ffi::c_void {
+        self.pointer.as_ptr()
+    }
+}
+
+impl std::fmt::Debug for NativeAccessibilityElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("NativeAccessibilityElement")
+            .field(&self.pointer)
+            .finish()
+    }
+}
+
+/// Native elements attached to nodes in one frame, in attachment order.
+pub type NativeAccessibilityChildren = Vec<(NodeId, Vec<NativeAccessibilityElement>)>;
+
 /// A listener for an accessibility action on a specific node.
 pub(crate) type A11yActionListener =
     Box<dyn FnMut(Option<&accesskit::ActionData>, &mut Window, &mut App) + 'static>;
@@ -284,9 +332,14 @@ impl A11y {
         self.nodes.begin_frame(self.window_title.as_ref());
     }
 
-    /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
-    pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
+    /// Finalize the tree and produce a [`TreeUpdate`] and the frame's native
+    /// children for the platform adapter.
+    pub(crate) fn end_frame(
+        &mut self,
+        frame: debug::FrameDebugInfo,
+    ) -> (TreeUpdate, NativeAccessibilityChildren) {
         let update = self.nodes.finalize();
+        let native_children = std::mem::take(&mut self.nodes.native_children);
         self.debug.capture(
             &update,
             self.nodes.focus,
@@ -294,9 +347,10 @@ impl A11y {
             self.window_title.as_ref(),
             frame,
         );
+        self.debug.capture_native_children(&native_children);
         #[cfg(debug_assertions)]
         self.debug.capture_node_info(&self.nodes.node_info);
-        update
+        (update, native_children)
     }
 
     pub(crate) fn debug_tree_json(&self) -> Option<String> {
@@ -396,6 +450,32 @@ impl<'a> A11ySubtreeBuilder<'a> {
         true
     }
 
+    /// Present platform accessibility objects as trailing children of this
+    /// element's node, after its AccessKit children.
+    ///
+    /// Attachments last for one frame, so the element attaches its objects on
+    /// every frame that presents them. Hit testing within an object's frame
+    /// returns the object, and a focused node reports its focused object as
+    /// the focus. See [`NativeAccessibilityElement`].
+    pub fn attach_native_children(
+        &mut self,
+        elements: impl IntoIterator<Item = NativeAccessibilityElement>,
+    ) {
+        let elements = elements.into_iter().collect::<Vec<_>>();
+        if elements.is_empty() {
+            return;
+        }
+        match self
+            .nodes
+            .native_children
+            .iter_mut()
+            .find(|(parent, _)| *parent == self.parent_id)
+        {
+            Some((_, attached)) => attached.extend(elements),
+            None => self.nodes.native_children.push((self.parent_id, elements)),
+        }
+    }
+
     /// A mutable reference to the parent node.
     pub fn parent_node(&mut self) -> &mut accesskit::Node {
         self.nodes
@@ -420,6 +500,7 @@ pub(crate) struct A11yNodeBuilder {
     /// `HashMap<NodeId, Node>` to remove the need for `seen_ids`
     all_nodes: Vec<(NodeId, accesskit::Node)>,
     seen_ids: FxHashSet<NodeId>,
+    native_children: NativeAccessibilityChildren,
     /// The node that GPUI considers focused. Note that this may be different to
     /// what is reported to accesskit - see [`Self::active_descendant`]
     focus: Option<NodeId>,
@@ -442,6 +523,7 @@ impl A11yNodeBuilder {
             nodes_stack: SmallVec::new(),
             all_nodes: Vec::new(),
             seen_ids: FxHashSet::default(),
+            native_children: Vec::new(),
             focus: None,
             active_descendant: None,
             #[cfg(debug_assertions)]
@@ -536,6 +618,7 @@ impl A11yNodeBuilder {
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
+        self.native_children.clear();
         #[cfg(debug_assertions)]
         self.node_info.clear();
         let mut root_node = accesskit::Node::new(accesskit::Role::Window);
@@ -942,7 +1025,7 @@ mod tests {
         a11y.nodes.pop(); // c
         a11y.nodes.pop(); // b
 
-        let update = a11y.end_frame(Default::default());
+        let (update, _) = a11y.end_frame(Default::default());
         assert_eq!(update.focus, a);
     }
 }

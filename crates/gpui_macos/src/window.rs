@@ -2535,6 +2535,24 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn a11y_set_native_children(&self, children: gpui::NativeAccessibilityChildren) {
+        let mut lock = self.0.lock();
+        if let Some(host) = lock.accesskit.as_mut() {
+            let children = children.into_iter().map(|(node, elements)| {
+                (
+                    node,
+                    elements
+                        .iter()
+                        .map(gpui::NativeAccessibilityElement::as_ptr)
+                        .collect(),
+                )
+            });
+            // SAFETY: Each element wraps a live NSObject implementing NSAccessibility while
+            // its owner is alive, and the adapter retains every element before this returns.
+            unsafe { host.adapter.set_native_children(children) };
+        }
+    }
+
     fn a11y_update_window_bounds(&self) {
         // macOS handles window bounds tracking automatically via NSAccessibility.
     }

@@ -67,7 +67,7 @@ use uuid::Uuid;
 pub(crate) mod a11y;
 mod prompts;
 
-pub use a11y::A11ySubtreeBuilder;
+pub use a11y::{A11ySubtreeBuilder, NativeAccessibilityChildren, NativeAccessibilityElement};
 
 use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
@@ -3736,7 +3736,7 @@ impl Window {
                 tab_stop_count: self.next_frame.tab_stops.tab_stop_count(),
             };
             // clear the builder state regardless
-            let tree_update = self.a11y.end_frame(frame_info);
+            let (tree_update, native_children) = self.a11y.end_frame(frame_info);
 
             if should_send_a11y_update {
                 log::debug!(
@@ -3744,6 +3744,8 @@ impl Window {
                     tree_update.nodes.len()
                 );
                 self.platform_window.a11y_tree_update(tree_update);
+                self.platform_window
+                    .a11y_set_native_children(native_children);
             }
         }
     }
@@ -10420,6 +10422,71 @@ mod tests {
 
         cx.deactivate_accessibility(window);
         assert!(!a11y_state(cx).0);
+    }
+
+    fn a11y_node(
+        window: AnyWindowHandle,
+        cx: &mut TestAppContext,
+        label: &str,
+    ) -> serde_json::Value {
+        let tree: serde_json::Value = cx
+            .update_window(window, |_, window, _| {
+                serde_json::from_str(&window.debug_a11y_tree_json().unwrap()).unwrap()
+            })
+            .unwrap();
+        tree["nodes"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|node| node["aria"]["label"] == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("no node labeled {label}"))
+    }
+
+    #[gpui::test]
+    fn test_accessibility_native_children_last_one_frame(cx: &mut TestAppContext) {
+        use crate::NativeAccessibilityElement;
+
+        struct NativeView {
+            element: NativeAccessibilityElement,
+            attached: bool,
+        }
+
+        impl Render for NativeView {
+            fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let element = self.attached.then(|| self.element.clone());
+                div().size_full().child(
+                    div()
+                        .id("pane")
+                        .role(accesskit::Role::Group)
+                        .aria_label("Pane")
+                        .size(px(10.))
+                        .a11y_synthetic_children(move |builder| {
+                            builder.attach_native_children(element);
+                        }),
+                )
+            }
+        }
+
+        let owner: Rc<dyn std::any::Any> = Rc::new(0u8);
+        let pointer = std::ptr::NonNull::from(&*owner).cast::<std::ffi::c_void>();
+        // SAFETY: The test platform never dereferences native children.
+        let element = unsafe { NativeAccessibilityElement::new(pointer, owner) };
+        let view = cx.add_window(move |_, _| NativeView {
+            element,
+            attached: true,
+        });
+        let window: AnyWindowHandle = view.into();
+        cx.activate_accessibility(window);
+        assert_eq!(a11y_node(window, cx, "Pane")["native_children"], 1);
+
+        view.update(cx, |view, _, cx| {
+            view.attached = false;
+            cx.notify();
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(a11y_node(window, cx, "Pane")["native_children"].is_null());
     }
 
     #[gpui::test]
