@@ -26,11 +26,11 @@ use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, DisplayId,
     ExternalDragPayload, ExternalPaths, FileDragIcon, FileDropEvent, ForegroundExecutor,
-    KeyDownEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
+    KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size,
+    SystemWindowTab, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
+    WindowKind, WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -705,7 +705,8 @@ struct MacWindowState {
     close_callback: Option<Box<dyn FnOnce()>>,
     appearance_changed_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
-    last_key_equivalent: Option<KeyDownEvent>,
+    key_equivalent_event: Option<(Retained<Objc2Object>, bool)>,
+    offering_key_equivalent: bool,
     last_left_mouse_down_event: Option<Retained<Objc2Object>>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
@@ -716,7 +717,7 @@ struct MacWindowState {
     native_traffic_light_masks: Option<TrafficLightMasks>,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
-    keystroke_for_do_command: Option<Keystroke>,
+    keystroke_for_do_command: Option<KeyDownEvent>,
     do_command_handled: Option<bool>,
     external_files_dragged: bool,
     // Whether the next left-mouse click is also the focusing click.
@@ -1162,7 +1163,8 @@ impl MacWindow {
                 close_callback: None,
                 appearance_changed_callback: None,
                 input_handler: None,
-                last_key_equivalent: None,
+                key_equivalent_event: None,
+                offering_key_equivalent: false,
                 last_left_mouse_down_event: None,
                 synthetic_drag_counter: 0,
                 traffic_light_position: titlebar
@@ -2175,6 +2177,10 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().event_callback = Some(callback);
     }
 
+    fn is_offering_key_equivalent(&self) -> bool {
+        self.0.lock().offering_key_equivalent
+    }
+
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.as_ref().lock().activate_callback = Some(callback);
     }
@@ -2952,9 +2958,34 @@ unsafe fn is_ime_input_source_active() -> bool {
     }
 }
 
-extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
+extern "C" fn handle_key_event(this: &Object, native_event: id, mut key_equivalent: bool) -> BOOL {
+    let state = unsafe { get_window_state(this) };
+    let event_type: NSEventType = unsafe { msg_send![native_event, type] };
+    if event_type != NSEventType::NSKeyDown {
+        state.lock().key_equivalent_event = None;
+        return dispatch_key_event(this, native_event, false);
+    }
+    let previous = state.lock().key_equivalent_event.take();
+    if let Some((previous, handled)) = previous
+        && Retained::as_ptr(&previous).cast::<Object>() == native_event
+    {
+        if handled {
+            state.lock().key_equivalent_event = Some((previous, true));
+            return YES;
+        }
+        // AppKit can return an unclaimed equivalent through performKeyEquivalent again.
+        key_equivalent = false;
+    }
+    let handled = dispatch_key_event(this, native_event, key_equivalent);
+    if let Some(event) = unsafe { Retained::retain(native_event.cast::<Objc2Object>()) } {
+        state.lock().key_equivalent_event = Some((event, handled == YES));
+    }
+    handled
+}
+
+fn dispatch_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
+    let lock = window_state.as_ref().lock();
 
     let window_height = lock.content_size().height;
     let event = unsafe { platform_input_from_native(native_event, Some(window_height)) };
@@ -2964,28 +2995,25 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
     };
 
     let run_callback = |event: PlatformInput| -> BOOL {
-        let mut callback = window_state.as_ref().lock().event_callback.take();
+        let (mut callback, previous_phase) = {
+            let mut state = window_state.lock();
+            let previous_phase = state.offering_key_equivalent;
+            state.offering_key_equivalent = key_equivalent;
+            (state.event_callback.take(), previous_phase)
+        };
         let handled: BOOL = if let Some(callback) = callback.as_mut() {
             !callback(event).propagate as BOOL
         } else {
             NO
         };
-        window_state.as_ref().lock().event_callback = callback;
+        let mut state = window_state.lock();
+        state.event_callback = callback;
+        state.offering_key_equivalent = previous_phase;
         handled
     };
 
     match event {
         PlatformInput::KeyDown(key_down_event) => {
-            // For certain keystrokes, macOS will first dispatch a "key equivalent" event.
-            // If that event isn't handled, it will then dispatch a "key down" event. GPUI
-            // makes no distinction between these two types of events, so we need to ignore
-            // the "key down" event if we've already just processed its "key equivalent" version.
-            if key_equivalent {
-                lock.last_key_equivalent = Some(key_down_event.clone());
-            } else if lock.last_key_equivalent.take().as_ref() == Some(&key_down_event) {
-                return NO;
-            }
-
             drop(lock);
 
             let is_composing =
@@ -3032,7 +3060,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             {
                 {
                     let mut lock = window_state.as_ref().lock();
-                    lock.keystroke_for_do_command = Some(key_down_event.keystroke.clone());
+                    lock.keystroke_for_do_command = Some(key_down_event.clone());
                     lock.do_command_handled.take();
                     drop(lock);
                 }
@@ -3057,6 +3085,11 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 return YES;
             }
 
+            // AppKit must try the menu bar before text interpretation, including Fn equivalents.
+            if key_equivalent {
+                return NO;
+            }
+
             if key_down_event.is_held
                 && let Some(key_char) = key_down_event.keystroke.key_char.as_ref()
             {
@@ -3070,12 +3103,6 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 if handled == Some(YES) {
                     return YES;
                 }
-            }
-
-            // Don't send key equivalents to the input handler if there are key modifiers other
-            // than Function key, or macOS shortcuts like cmd-` will stop working.
-            if key_equivalent && key_down_event.keystroke.modifiers != Modifiers::function() {
-                return NO;
             }
 
             unsafe {
@@ -3497,6 +3524,8 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
             let mut lock = window_state.as_ref().lock();
             if is_active {
                 lock.move_traffic_light();
+            } else {
+                lock.key_equivalent_event = None;
             }
 
             if let Some(mut callback) = lock.activate_callback.take() {
@@ -3805,25 +3834,35 @@ extern "C" fn attributed_substring_for_proposed_range(
     .unwrap_or(nil)
 }
 
-// We ignore which selector it asks us to do because the user may have
-// bound the shortcut to something else.
-extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
+// Editing selectors preserve the original key for applications that own raw terminal input.
+extern "C" fn do_command_by_selector(this: &Object, _: Sel, selector: Sel) {
     let state = unsafe { get_window_state(this) };
-    let mut lock = state.as_ref().lock();
-    let keystroke = lock.keystroke_for_do_command.take();
+    let mut lock = state.lock();
+    let event = lock.keystroke_for_do_command.take();
+    if event.is_none() {
+        // NSWindow delivers Command-Period as cancel: instead of keyDown:.
+        // Match the retained NSEvent itself, not a keystroke or timestamp that can repeat.
+        let current: id = unsafe { msg_send![class!(NSApplication), sharedApplication] };
+        let current: id = unsafe { msg_send![current, currentEvent] };
+        let pending = lock
+            .key_equivalent_event
+            .as_ref()
+            .is_some_and(|(event, handled)| {
+                !handled && Retained::as_ptr(event).cast::<Object>() == current
+            });
+        drop(lock);
+        if selector == sel!(cancel:) && pending {
+            handle_key_event(this, current, false);
+        }
+        return;
+    }
     let mut event_callback = lock.event_callback.take();
     drop(lock);
-
-    if let Some((keystroke, callback)) = keystroke.zip(event_callback.as_mut()) {
-        let handled = (callback)(PlatformInput::KeyDown(KeyDownEvent {
-            keystroke,
-            is_held: false,
-            prefer_character_input: false,
-        }));
-        state.as_ref().lock().do_command_handled = Some(!handled.propagate);
+    if let Some((event, callback)) = event.zip(event_callback.as_mut()) {
+        let handled = callback(PlatformInput::KeyDown(event));
+        state.lock().do_command_handled = Some(!handled.propagate);
     }
-
-    state.as_ref().lock().event_callback = event_callback;
+    state.lock().event_callback = event_callback;
 }
 
 extern "C" fn view_did_change_effective_appearance(this: &Object, _: Sel) {

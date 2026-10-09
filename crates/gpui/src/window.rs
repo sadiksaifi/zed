@@ -1204,6 +1204,7 @@ pub struct Window {
     modifiers: Modifiers,
     capslock: Capslock,
     native_key_event: Option<NativeKeyEvent>,
+    offering_key_equivalent: bool,
     scale_factor: f32,
     pub(crate) bounds_observers: SubscriberSet<(), AnyObserver>,
     appearance: WindowAppearance,
@@ -1966,7 +1967,9 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         let native_key_event = window.platform_window.native_key_event();
+                        let offering = window.platform_window.is_offering_key_equivalent();
                         window.with_native_key_event(native_key_event, |window| {
+                            window.offering_key_equivalent = offering;
                             window.dispatch_event(event, cx)
                         })
                     })
@@ -2089,6 +2092,7 @@ impl Window {
             modifiers,
             capslock,
             native_key_event: None,
+            offering_key_equivalent: false,
             scale_factor,
             bounds_observers: SubscriberSet::new(),
             appearance,
@@ -3366,13 +3370,21 @@ impl Window {
         self.native_key_event
     }
 
+    /// True while AppKit is offering a key equivalent to view actions, before menu handling.
+    /// Raw terminal input must propagate here so native shortcuts can claim the event.
+    pub fn is_offering_key_equivalent(&self) -> bool {
+        self.offering_key_equivalent
+    }
+
     fn with_native_key_event<R>(
         &mut self,
         native_key_event: Option<NativeKeyEvent>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let outer_native_key_event = mem::replace(&mut self.native_key_event, native_key_event);
+        let outer_offering = mem::replace(&mut self.offering_key_equivalent, false);
         let result = f(self);
+        self.offering_key_equivalent = outer_offering;
         self.native_key_event = outer_native_key_event;
         result
     }

@@ -1188,6 +1188,15 @@ impl VisualTestContext {
         self.background_executor.run_until_parked();
     }
 
+    /// Offers a key equivalent before the native menu and ordinary key-down phases.
+    pub fn simulate_key_equivalent<E: KeyEvent>(&mut self, event: E) -> bool {
+        let handled = self
+            .test_window(self.window)
+            .simulate_key_equivalent(event.to_platform_input());
+        self.background_executor.run_until_parked();
+        handled
+    }
+
     /// Simulate a key event from the platform along with the platform facts it carries, as
     /// [`Window::native_key_event`] reports them during dispatch.
     /// Make sure you've called [VisualTestContext::draw] first!

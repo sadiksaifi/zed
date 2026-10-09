@@ -1059,6 +1059,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn native_key_event(&self) -> Option<NativeKeyEvent> {
         None
     }
+    /// Whether the current input callback is offering a native menu key equivalent.
+    /// Raw-input sinks should let unbound keys propagate during this phase.
+    fn is_offering_key_equivalent(&self) -> bool {
+        false
+    }
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     /// Registers the callback invoked when [`Self::visibility`] changes. Only
     /// transitions are reported; the callback runs on the main thread outside

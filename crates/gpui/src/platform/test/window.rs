@@ -37,6 +37,8 @@ pub enum TestWindowRequest {
     },
     /// [`crate::Window::minimize_window`] was called.
     Minimize,
+    /// The application requested the native character palette.
+    ShowCharacterPalette,
     /// [`crate::Window::zoom_window`] was called, or the window opened maximized.
     Zoom,
     /// [`crate::Window::start_window_move`] was called.
@@ -70,6 +72,7 @@ pub(crate) struct TestWindowState {
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     native_key_event: Option<NativeKeyEvent>,
+    offering_key_equivalent: bool,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     live_resizing: bool,
     live_resize_callback: Option<Box<dyn FnMut(bool)>>,
@@ -195,6 +198,7 @@ impl TestWindow {
             external_drag_payloads: Vec::new(),
             start_external_drag_result: false,
             native_key_event: None,
+            offering_key_equivalent: false,
             bounds_requests: Vec::new(),
         })))
     }
@@ -439,6 +443,14 @@ impl TestWindow {
         !result.propagate
     }
 
+    /// Offers a native menu equivalent to the application's view actions.
+    pub fn simulate_key_equivalent(&mut self, event: PlatformInput) -> bool {
+        let previous = std::mem::replace(&mut self.0.lock().offering_key_equivalent, true);
+        let handled = self.simulate_input(event);
+        self.0.lock().offering_key_equivalent = previous;
+        handled
+    }
+
     /// Delivers a key event with the platform facts a native platform would report for it.
     pub fn simulate_native_key_input(
         &mut self,
@@ -644,7 +656,10 @@ impl PlatformWindow for TestWindow {
     }
 
     fn show_character_palette(&self) {
-        unimplemented!()
+        self.0
+            .lock()
+            .requests
+            .push(TestWindowRequest::ShowCharacterPalette);
     }
 
     fn minimize(&self) {
@@ -715,6 +730,10 @@ impl PlatformWindow for TestWindow {
 
     fn on_input(&self, callback: Box<dyn FnMut(crate::PlatformInput) -> DispatchEventResult>) {
         self.0.lock().input_callback = Some(callback)
+    }
+
+    fn is_offering_key_equivalent(&self) -> bool {
+        self.0.lock().offering_key_equivalent
     }
 
     fn native_key_event(&self) -> Option<NativeKeyEvent> {
