@@ -6,7 +6,7 @@ fn main() {
     use cocoa::{
         appkit::{NSEventModifierFlags, NSEventType},
         base::{BOOL, NO, YES, id, nil},
-        foundation::{NSAutoreleasePool, NSPoint, NSString},
+        foundation::NSPoint,
     };
     use gpui::{
         Application, Context, FocusHandle, KeyDownEvent, Render, Window, WindowOptions, div,
@@ -57,7 +57,8 @@ fn main() {
                 let window: id = msg_send![view, window];
                 let number: isize = msg_send![window, windowNumber];
                 let make_event = |text: &str, code: u16, repeat: BOOL, flags: NSEventModifierFlags| {
-                    let text = NSString::alloc(nil).init_str(text).autorelease();
+                    let text_string = objc2_foundation::NSString::from_str(text);
+                    let text = Retained::as_ptr(&text_string) as id;
                     let event: id = msg_send![class!(NSEvent),
                         keyEventWithType: NSEventType::NSKeyDown
                         location: NSPoint::new(0., 0.)
@@ -104,7 +105,8 @@ fn main() {
                 let target: id = msg_send![class!(NSMutableArray), array];
                 let menu: id = msg_send![class!(NSMenu), new];
                 let _: () = msg_send![menu, setAutoenablesItems: NO];
-                let text = NSString::alloc(nil).init_str(" ").autorelease();
+                let text_string = objc2_foundation::NSString::from_str(" ");
+                let text = Retained::as_ptr(&text_string) as id;
                 let item: id = msg_send![class!(NSMenuItem), alloc];
                 let item: id = msg_send![item, initWithTitle: text action: sel!(addObject:) keyEquivalent: text];
                 let flags = NSEventModifierFlags::NSCommandKeyMask | NSEventModifierFlags::NSControlKeyMask;
@@ -125,6 +127,46 @@ fn main() {
                 down(&arrow);
                 assert_eq!(events.borrow().len(), 9);
                 assert!(events.borrow()[8].1.is_held, "editing-selector fallback preserves repeat metadata");
+
+                let option_arrow = make_event("\u{f702}", 123, YES, NSEventModifierFlags::NSAlternateKeyMask);
+                assert_eq!(offer(&option_arrow), NO, "editing selectors retain the native offer phase");
+                assert_eq!(events.borrow().len(), 10);
+                assert!(events.borrow()[9].0);
+                down(&option_arrow);
+                assert_eq!(events.borrow().len(), 11);
+                assert!(!events.borrow()[10].0);
+                assert!(events.borrow()[10].1.is_held);
+
+                let escape = make_event("\u{1b}", 53, NO, NSEventModifierFlags::empty());
+                down(&escape);
+                assert_eq!(events.borrow().len(), 12);
+                assert_eq!(events.borrow()[11].1.keystroke.key, "escape");
+                assert!(!events.borrow()[11].0);
+            }
+            // Drive AppKit's real cancellation route, including currentEvent ownership.
+            events.borrow_mut().clear();
+            unsafe {
+                let window: id = msg_send![view, window];
+                let number: isize = msg_send![window, windowNumber];
+                let text_string = objc2_foundation::NSString::from_str(".");
+                let text = Retained::as_ptr(&text_string) as id;
+                let event: id = msg_send![class!(NSEvent),
+                    keyEventWithType: NSEventType::NSKeyDown
+                    location: NSPoint::new(0., 0.)
+                    modifierFlags: NSEventModifierFlags::NSCommandKeyMask
+                    timestamp: 0.0f64 windowNumber: number context: nil
+                    characters: text charactersIgnoringModifiers: text isARepeat: NO keyCode: 47u16];
+                let app: id = msg_send![class!(NSApplication), sharedApplication];
+                let _: () = msg_send![app, postEvent: event atStart: NO];
+            }
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            {
+                let events = events.borrow();
+                assert_eq!(events.len(), 2, "Command-Period has one offer and one ordinary delivery");
+                assert!(events[0].0);
+                assert!(!events[1].0);
+                assert_eq!(events[1].1.keystroke.key, ".");
+                assert!(events[1].1.keystroke.modifiers.platform);
             }
             println!("native key-equivalent regression fixture passed");
             cx.update(|cx| cx.quit());

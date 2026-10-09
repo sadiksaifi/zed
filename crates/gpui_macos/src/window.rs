@@ -278,6 +278,10 @@ unsafe fn build_classes() {
                 sel!(doCommandBySelector:),
                 do_command_by_selector as extern "C" fn(&Object, Sel, Sel),
             );
+            decl.add_method(
+                sel!(cancelOperation:),
+                cancel_operation as extern "C" fn(&Object, Sel, id),
+            );
 
             decl.add_method(
                 sel!(acceptsFirstMouse:),
@@ -2992,6 +2996,18 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, mut key_equivale
 }
 
 fn dispatch_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
+    let state = unsafe { get_window_state(this) };
+    let previous_phase = {
+        let mut state = state.lock();
+        std::mem::replace(&mut state.offering_key_equivalent, key_equivalent)
+    };
+    // Input-context editing selectors can invoke the callback before run_callback.
+    let handled = dispatch_key_event_inner(this, native_event, key_equivalent);
+    state.lock().offering_key_equivalent = previous_phase;
+    handled
+}
+
+fn dispatch_key_event_inner(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let lock = window_state.as_ref().lock();
 
@@ -3003,12 +3019,7 @@ fn dispatch_key_event(this: &Object, native_event: id, key_equivalent: bool) -> 
     };
 
     let run_callback = |event: PlatformInput| -> BOOL {
-        let (mut callback, previous_phase) = {
-            let mut state = window_state.lock();
-            let previous_phase = state.offering_key_equivalent;
-            state.offering_key_equivalent = key_equivalent;
-            (state.event_callback.take(), previous_phase)
-        };
+        let mut callback = window_state.lock().event_callback.take();
         let handled: BOOL = if let Some(callback) = callback.as_mut() {
             !callback(event).propagate as BOOL
         } else {
@@ -3016,7 +3027,6 @@ fn dispatch_key_event(this: &Object, native_event: id, key_equivalent: bool) -> 
         };
         let mut state = window_state.lock();
         state.event_callback = callback;
-        state.offering_key_equivalent = previous_phase;
         handled
     };
 
@@ -3842,26 +3852,36 @@ extern "C" fn attributed_substring_for_proposed_range(
     .unwrap_or(nil)
 }
 
+// AppKit otherwise synthesizes a bare Escape for Command-Period. Own cancellation so
+// the original native event reaches raw input after menu arbitration instead.
+extern "C" fn cancel_operation(this: &Object, _: Sel, _: id) {
+    let state = unsafe { get_window_state(this) };
+    let lock = state.lock();
+    if lock.keystroke_for_do_command.is_some() {
+        drop(lock);
+        do_command_by_selector(this, sel!(doCommandBySelector:), sel!(cancelOperation:));
+        return;
+    }
+    let app: id = unsafe { msg_send![class!(NSApplication), sharedApplication] };
+    let current: id = unsafe { msg_send![app, currentEvent] };
+    let pending = lock
+        .key_equivalent_event
+        .as_ref()
+        .is_some_and(|(event, handled)| {
+            !handled && Retained::as_ptr(event).cast::<Object>() == current
+        });
+    drop(lock);
+    if pending {
+        handle_key_event(this, current, false);
+    }
+}
+
 // Editing selectors preserve the original key for applications that own raw terminal input.
-extern "C" fn do_command_by_selector(this: &Object, _: Sel, selector: Sel) {
+extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
     let state = unsafe { get_window_state(this) };
     let mut lock = state.lock();
     let event = lock.keystroke_for_do_command.take();
     if event.is_none() {
-        // NSWindow delivers Command-Period as cancel: instead of keyDown:.
-        // Match the retained NSEvent itself, not a keystroke or timestamp that can repeat.
-        let current: id = unsafe { msg_send![class!(NSApplication), sharedApplication] };
-        let current: id = unsafe { msg_send![current, currentEvent] };
-        let pending = lock
-            .key_equivalent_event
-            .as_ref()
-            .is_some_and(|(event, handled)| {
-                !handled && Retained::as_ptr(event).cast::<Object>() == current
-            });
-        drop(lock);
-        if selector == sel!(cancel:) && pending {
-            handle_key_event(this, current, false);
-        }
         return;
     }
     let mut event_callback = lock.event_callback.take();

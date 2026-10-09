@@ -5,6 +5,8 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 ## Patches
 
+- `fix(gpui_macos): preserve Command-Period and editing-selector offer phases`
+
 - `fix(gpui_macos): preserve native key-equivalent arbitration and exact-once fallback`
 - `fix(gpui_macos): invalidate character coordinates only in the owning input context`
 
