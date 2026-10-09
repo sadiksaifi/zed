@@ -5,6 +5,9 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 ## Patches
 
+- `fix(gpui_macos): preserve native key-equivalent arbitration and exact-once fallback`
+- `fix(gpui_macos): invalidate character coordinates only in the owning input context`
+
 - `fix(gpui_macos): keep custom traffic lights in place while exiting fullscreen`
 - `fix(gpui_macos): restore filled windows on title bar double-click`
 - `fix(gpui_macos): distinguish filled windows from other tiled layouts`

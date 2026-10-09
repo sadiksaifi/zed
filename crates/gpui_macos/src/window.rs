@@ -2288,16 +2288,24 @@ impl PlatformWindow for MacWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
-        let executor = self.0.lock().foreground_executor.clone();
+        let (executor, view) = {
+            let state = self.0.lock();
+            (state.foreground_executor.clone(), state.native_view)
+        };
+        let context: *mut Objc2Object = unsafe { msg_send![view.as_ptr(), inputContext] };
+        let Some(context) = (unsafe { Retained::retain(context) }) else {
+            return;
+        };
         executor
             .spawn(async move {
                 unsafe {
-                    let input_context: id =
+                    let current: *mut Objc2Object =
                         msg_send![class!(NSTextInputContext), currentInputContext];
-                    if input_context.is_null() {
-                        return;
+                    // The deferred invalidation must not target another window after focus moves.
+                    if current == Retained::as_ptr(&context).cast_mut() {
+                        let _: () =
+                            msg_send![current.cast::<Object>(), invalidateCharacterCoordinates];
                     }
-                    let _: () = msg_send![input_context, invalidateCharacterCoordinates];
                 }
             })
             .detach()
