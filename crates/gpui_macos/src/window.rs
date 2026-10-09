@@ -570,9 +570,14 @@ struct TrafficLightFrames {
     close: Objc2NSRect,
     minimize: Objc2NSRect,
     zoom: Objc2NSRect,
-    close_autoresizing: NSAutoresizingMaskOptions,
-    minimize_autoresizing: NSAutoresizingMaskOptions,
-    zoom_autoresizing: NSAutoresizingMaskOptions,
+}
+
+/// AppKit's autoresizing masks for the standard buttons, held while GPUI pins them.
+#[derive(Clone, Copy)]
+struct TrafficLightMasks {
+    close: NSAutoresizingMaskOptions,
+    minimize: NSAutoresizingMaskOptions,
+    zoom: NSAutoresizingMaskOptions,
 }
 
 struct TrafficLightButtons {
@@ -706,6 +711,9 @@ struct MacWindowState {
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
     pre_fullscreen_traffic_light_frames: Option<TrafficLightFrames>,
+    // Kept apart from the frames, which `window_did_exit_fullscreen` can discard while the
+    // buttons are pinned, so a later capture never mistakes GPUI's masks for AppKit's.
+    native_traffic_light_masks: Option<TrafficLightMasks>,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
@@ -776,6 +784,13 @@ impl MacWindowState {
                 // AppKit lays the container out at its own height while the window exits
                 // fullscreen. Pinning the buttons to its top keeps their offset from the
                 // window's top edge until the exit finishes and the container is resized again.
+                if self.native_traffic_light_masks.is_none() {
+                    self.native_traffic_light_masks = Some(TrafficLightMasks {
+                        close: buttons.close.autoresizingMask(),
+                        minimize: buttons.minimize.autoresizingMask(),
+                        zoom: buttons.zoom.autoresizingMask(),
+                    });
+                }
                 let pinned_to_top = NSAutoresizingMaskOptions::ViewMinYMargin;
                 buttons.close.setAutoresizingMask(pinned_to_top);
                 buttons.minimize.setAutoresizingMask(pinned_to_top);
@@ -810,9 +825,6 @@ impl MacWindowState {
             close: buttons.close.frame(),
             minimize: buttons.minimize.frame(),
             zoom: buttons.zoom.frame(),
-            close_autoresizing: buttons.close.autoresizingMask(),
-            minimize_autoresizing: buttons.minimize.autoresizingMask(),
-            zoom_autoresizing: buttons.zoom.autoresizingMask(),
         })
     }
 
@@ -842,6 +854,13 @@ impl MacWindowState {
     }
 
     fn restore_traffic_light(&mut self) {
+        if let Some(masks) = self.native_traffic_light_masks.take()
+            && let Some(buttons) = self.traffic_light_buttons()
+        {
+            buttons.close.setAutoresizingMask(masks.close);
+            buttons.minimize.setAutoresizingMask(masks.minimize);
+            buttons.zoom.setAutoresizingMask(masks.zoom);
+        }
         if let Some(frames) = self.traffic_light_frames.take() {
             let Some(buttons) = self.traffic_light_buttons() else {
                 return;
@@ -850,11 +869,6 @@ impl MacWindowState {
                 return;
             };
 
-            buttons.close.setAutoresizingMask(frames.close_autoresizing);
-            buttons
-                .minimize
-                .setAutoresizingMask(frames.minimize_autoresizing);
-            buttons.zoom.setAutoresizingMask(frames.zoom_autoresizing);
             buttons.close.setFrame(frames.close);
             buttons.minimize.setFrame(frames.minimize);
             buttons.zoom.setFrame(frames.zoom);
@@ -1156,6 +1170,7 @@ impl MacWindow {
                     .and_then(|titlebar| titlebar.traffic_light_position),
                 traffic_light_frames: None,
                 pre_fullscreen_traffic_light_frames: None,
+                native_traffic_light_masks: None,
                 transparent_titlebar: titlebar
                     .as_ref()
                     .is_none_or(|titlebar| titlebar.appears_transparent),
