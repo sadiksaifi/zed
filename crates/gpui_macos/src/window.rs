@@ -55,10 +55,10 @@ use objc2::{
     runtime::{AnyObject as Objc2Object, ProtocolObject},
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertStyle, NSBeep, NSButton as Objc2NSButton, NSDraggingImageComponent,
-    NSDraggingImageComponentIconKey, NSDraggingItem, NSImage, NSPasteboardWriting, NSTrackingArea,
-    NSTrackingAreaOptions, NSView as Objc2NSView, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWorkspace,
+    NSAlert, NSAlertStyle, NSAutoresizingMaskOptions, NSBeep, NSButton as Objc2NSButton,
+    NSDraggingImageComponent, NSDraggingImageComponentIconKey, NSDraggingItem, NSImage,
+    NSPasteboardWriting, NSTrackingArea, NSTrackingAreaOptions, NSView as Objc2NSView,
+    NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton, NSWorkspace,
 };
 use objc2_foundation::{NSPoint as Objc2NSPoint, NSRect as Objc2NSRect, NSURL};
 use parking_lot::Mutex;
@@ -570,6 +570,9 @@ struct TrafficLightFrames {
     close: Objc2NSRect,
     minimize: Objc2NSRect,
     zoom: Objc2NSRect,
+    close_autoresizing: NSAutoresizingMaskOptions,
+    minimize_autoresizing: NSAutoresizingMaskOptions,
+    zoom_autoresizing: NSAutoresizingMaskOptions,
 }
 
 struct TrafficLightButtons {
@@ -770,6 +773,13 @@ impl MacWindowState {
                 let zoom_x = minimize_x + button_width + button_padding;
 
                 titlebar_container.setFrame(titlebar_frame);
+                // AppKit lays the container out at its own height while the window exits
+                // fullscreen. Pinning the buttons to its top keeps their offset from the
+                // window's top edge until the exit finishes and the container is resized again.
+                let pinned_to_top = NSAutoresizingMaskOptions::ViewMinYMargin;
+                buttons.close.setAutoresizingMask(pinned_to_top);
+                buttons.minimize.setAutoresizingMask(pinned_to_top);
+                buttons.zoom.setAutoresizingMask(pinned_to_top);
                 buttons.close.setFrameOrigin(Objc2NSPoint::new(
                     traffic_light_position.x.to_f64(),
                     traffic_light_position.y.to_f64(),
@@ -800,6 +810,9 @@ impl MacWindowState {
             close: buttons.close.frame(),
             minimize: buttons.minimize.frame(),
             zoom: buttons.zoom.frame(),
+            close_autoresizing: buttons.close.autoresizingMask(),
+            minimize_autoresizing: buttons.minimize.autoresizingMask(),
+            zoom_autoresizing: buttons.zoom.autoresizingMask(),
         })
     }
 
@@ -837,6 +850,11 @@ impl MacWindowState {
                 return;
             };
 
+            buttons.close.setAutoresizingMask(frames.close_autoresizing);
+            buttons
+                .minimize
+                .setAutoresizingMask(frames.minimize_autoresizing);
+            buttons.zoom.setAutoresizingMask(frames.zoom_autoresizing);
             buttons.close.setFrame(frames.close);
             buttons.minimize.setFrame(frames.minimize);
             buttons.zoom.setFrame(frames.zoom);
