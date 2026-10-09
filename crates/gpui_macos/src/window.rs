@@ -1421,6 +1421,40 @@ impl Drop for MacWindow {
     }
 }
 
+// AppKit serializes desktop tiling state in its saved-frame JSON suffix.
+// Fill is position 9; positions 1 through 8 are half- and quarter-screen layouts.
+// Unknown formats must use the standard zoom fallback instead of guessing geometry.
+unsafe fn native_tiling_position(window: id) -> Option<NSInteger> {
+    unsafe {
+        let saved_frame: id = msg_send![window, stringWithSavedFrame];
+        if saved_frame.is_null() {
+            return None;
+        }
+        let saved_frame = CStr::from_ptr(NSString::UTF8String(saved_frame))
+            .to_str()
+            .ok()?;
+        let json = ns_string(&saved_frame[saved_frame.find('{')?..]);
+        let data: id = msg_send![json, dataUsingEncoding: 4usize]; // NSUTF8StringEncoding
+        let metadata: id = msg_send![class!(NSJSONSerialization),
+            JSONObjectWithData: data options: 0usize error: nil];
+        let is_dictionary: BOOL = msg_send![metadata, isKindOfClass: class!(NSDictionary)];
+        if is_dictionary != YES {
+            return None;
+        }
+        let state: id = msg_send![metadata, objectForKey: ns_string("tilingState")];
+        let is_dictionary: BOOL = msg_send![state, isKindOfClass: class!(NSDictionary)];
+        if is_dictionary != YES {
+            return None;
+        }
+        let position: id = msg_send![state, objectForKey: ns_string("tilingPosition")];
+        let is_number: BOOL = msg_send![position, isKindOfClass: class!(NSNumber)];
+        if is_number != YES {
+            return None;
+        }
+        Some(msg_send![position, integerValue])
+    }
+}
+
 /// Calls `f` if the window is not closed.
 ///
 /// This should be used when spawning foreground tasks interacting with the
@@ -2283,15 +2317,23 @@ impl PlatformWindow for MacWindow {
                                     if responds_to_zoom_fill == YES
                                         && responds_to_zoom_untile == YES
                                     {
-                                        // `isZoomed` is false for Fill with tiling margins.
-                                        // Ask AppKit whether Return to Previous Size is available.
+                                        // `isZoomed` misses Fill with margins, and Return to Previous
+                                        // Size is also available for half- and quarter-screen layouts.
                                         let restore_item = NSMenuItem::new(nil).autorelease();
                                         let _: () =
                                             msg_send![restore_item, setAction: sel!(_zoomUntile:)];
                                         let can_restore: BOOL =
                                             msg_send![window, validateMenuItem: restore_item];
                                         if can_restore == YES {
-                                            let _: () = msg_send![window, _zoomUntile: nil];
+                                            match native_tiling_position(window) {
+                                                Some(9) => {
+                                                    let _: () = msg_send![window, _zoomUntile: nil];
+                                                }
+                                                Some(1..=8) => {
+                                                    let _: () = msg_send![window, _zoomFill: nil];
+                                                }
+                                                _ => window.zoom_(nil),
+                                            }
                                         } else {
                                             let _: () = msg_send![window, _zoomFill: nil];
                                         }
