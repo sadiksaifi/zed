@@ -5,6 +5,7 @@ Published tags are immutable. Another release on the same date adds `.1`, `.2`, 
 
 ## Patches
 
+- `fix(gpui_macos): restore filled windows on title bar double-click`
 - `fix(gpui_apple): use source-over destination alpha when compositing`
 - `perf(gpui_apple): allocate path targets when a scene first draws a path`
 - `fix(gpui_macos): host accessibility on GPUIView without class swizzling`

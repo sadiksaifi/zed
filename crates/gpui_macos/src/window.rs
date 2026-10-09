@@ -10,10 +10,10 @@ use block2::RcBlock;
 use cocoa::{
     appkit::{
         NSApplication, NSBackingStoreBuffered, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
-        NSFilenamesPboardType, NSPasteboard, NSRequestUserAttentionType, NSScreen, NSView,
-        NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial, NSVisualEffectState,
-        NSVisualEffectView, NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState,
-        NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+        NSFilenamesPboardType, NSMenuItem, NSPasteboard, NSRequestUserAttentionType, NSScreen,
+        NSView, NSViewHeightSizable, NSViewWidthSizable, NSVisualEffectMaterial,
+        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+        NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
     },
     base::{id, nil},
     foundation::{
@@ -2278,8 +2278,23 @@ impl PlatformWindow for MacWindow {
                                     // "Tiled windows have margins" setting.
                                     let responds_to_zoom_fill: BOOL =
                                         msg_send![window, respondsToSelector: sel!(_zoomFill:)];
-                                    if responds_to_zoom_fill == YES {
-                                        let _: () = msg_send![window, _zoomFill: nil];
+                                    let responds_to_zoom_untile: BOOL =
+                                        msg_send![window, respondsToSelector: sel!(_zoomUntile:)];
+                                    if responds_to_zoom_fill == YES
+                                        && responds_to_zoom_untile == YES
+                                    {
+                                        // `isZoomed` is false for Fill with tiling margins.
+                                        // Ask AppKit whether Return to Previous Size is available.
+                                        let restore_item = NSMenuItem::new(nil).autorelease();
+                                        let _: () =
+                                            msg_send![restore_item, setAction: sel!(_zoomUntile:)];
+                                        let can_restore: BOOL =
+                                            msg_send![window, validateMenuItem: restore_item];
+                                        if can_restore == YES {
+                                            let _: () = msg_send![window, _zoomUntile: nil];
+                                        } else {
+                                            let _: () = msg_send![window, _zoomFill: nil];
+                                        }
                                     } else {
                                         window.zoom_(nil);
                                     }
