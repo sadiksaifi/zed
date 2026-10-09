@@ -102,19 +102,25 @@ fn main() -> anyhow::Result<()> {
                     handle.update(cx, |_, window, _| window.toggle_fullscreen())?;
                     // Sample every visible button position until the transition settles.
                     let started = Instant::now();
+                    let mut windowed_samples = 0;
                     let mut misplaced = Vec::new();
                     while started.elapsed() < Duration::from_secs(2) {
                         let (fullscreen, origin) = handle.update(cx, |_, window, _| {
                             close_button_origin(window).map(|o| (window.is_fullscreen(), o))
                         })??;
-                        if !fullscreen
-                            && let Some(origin) = origin
-                            && !at_rest(origin)
-                        {
-                            misplaced.push((started.elapsed(), origin));
+                        if !fullscreen && let Some(origin) = origin {
+                            windowed_samples += 1;
+                            if !at_rest(origin) {
+                                misplaced.push((started.elapsed(), origin));
+                            }
                         }
                         cx.background_executor().timer(Duration::from_millis(8)).await;
                     }
+                    ensure!(
+                        !handle.update(cx, |_, window, _| window.is_fullscreen())?
+                            && windowed_samples > 0,
+                        "cycle {cycle}: window did not exit fullscreen"
+                    );
                     ensure!(
                         misplaced.is_empty(),
                         "cycle {cycle}: windowed traffic lights left {expected:?} after exiting fullscreen: {misplaced:?}"
