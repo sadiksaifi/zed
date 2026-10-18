@@ -1515,6 +1515,14 @@ fn default_bounds(display_id: Option<DisplayId>, cx: &mut App) -> WindowBounds {
     window_bounds_ctor(Bounds::new(final_origin, base_size))
 }
 
+impl Drop for Window {
+    fn drop(&mut self) {
+        // Native window cleanup can outlive this window and the foreground event loop.
+        // Release the input view while the App can still process entity releases.
+        drop(self.platform_window.take_input_handler());
+    }
+}
+
 impl Window {
     pub(crate) fn new(
         handle: AnyWindowHandle,
