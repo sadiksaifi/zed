@@ -164,6 +164,10 @@ impl WgpuAtlasTextures {
         size: Size<DevicePixels>,
         texture_kind: AtlasTextureKind,
     ) -> Option<AtlasTile> {
+        let limit = self.max_texture_size as i32;
+        if size.width.0 > limit || size.height.0 > limit {
+            return None;
+        }
         {
             let textures = &mut self.storage[texture_kind];
 
@@ -430,6 +434,56 @@ mod tests {
                 .map_err(|error| anyhow::anyhow!("failed to request device: {error}"))?;
             Ok((Arc::new(device), Arc::new(queue)))
         })
+    }
+
+    #[test]
+    fn oversized_image_retries_do_not_allocate_textures() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let limit = device.limits().max_texture_dimension_2d.min(8192);
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        atlas.0.lock().backend.max_texture_size = limit;
+        let key = |image_id| {
+            AtlasKey::Image(RenderImageParams {
+                image_id: ImageId(image_id),
+                frame_index: 0,
+            })
+        };
+        let boundary = Size {
+            width: DevicePixels(limit as i32),
+            height: DevicePixels(1),
+        };
+        let pixels = vec![0; limit as usize * 4];
+        atlas
+            .get_or_insert_with(key(1), &mut || Ok(Some((boundary, Cow::Borrowed(&pixels)))))?
+            .context("an image at the texture limit must fit")?;
+        let texture_count = atlas.0.lock().backend.storage[AtlasTextureKind::Polychrome]
+            .textures
+            .len();
+
+        for dimensions in [(limit + 2, 3), (3, limit + 2)] {
+            let size = Size {
+                width: DevicePixels(dimensions.0 as i32),
+                height: DevicePixels(dimensions.1 as i32),
+            };
+            let pixels = vec![0; dimensions.0 as usize * dimensions.1 as usize * 4];
+            for _ in 0..3 {
+                assert!(
+                    atlas
+                        .get_or_insert_with(key(2), &mut || {
+                            Ok(Some((size, Cow::Borrowed(&pixels))))
+                        })
+                        .is_err()
+                );
+                assert_eq!(
+                    atlas.0.lock().backend.storage[AtlasTextureKind::Polychrome]
+                        .textures
+                        .len(),
+                    texture_count,
+                    "a refused image must not retain a texture on each retry"
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]
