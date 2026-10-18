@@ -293,6 +293,31 @@ mod tests {
     };
 
     #[gpui::test]
+    fn closing_window_releases_input_view_before_native_window_cleanup(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, cx| ConfigurationTestView {
+            focus_handle: cx.focus_handle(),
+            configuration: TextInputConfiguration::default(),
+        });
+        let view = window.root(cx).expect("window has a root view");
+        let weak_view = view.downgrade();
+        let test_window = cx.test_window(window.into());
+        let window = AnyWindowHandle::from(window);
+        cx.update_window(window, |_, window, cx| {
+            let focus_handle = view.read(cx).focus_handle.clone();
+            window.focus(&focus_handle, cx);
+            window.draw(cx).clear(cx);
+        })
+        .expect("window is open");
+        drop(view);
+
+        cx.update_window(window, |_, window, _| window.remove_window())
+            .expect("window closes");
+
+        weak_view.assert_released();
+        drop(test_window);
+    }
+
+    #[gpui::test]
     fn text_input_configuration_and_focus_state_are_forwarded_on_change(cx: &mut TestAppContext) {
         let custom = TextInputConfiguration {
             autocorrect: true,
