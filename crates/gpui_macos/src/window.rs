@@ -1837,6 +1837,14 @@ impl PlatformWindow for MacWindow {
             PromptLevel::Warning => NSAlertStyle::Warning,
             PromptLevel::Info => NSAlertStyle::Informational,
         });
+        // macOS 26 omits the application icon from a sheet alert that keeps its default image,
+        // and it badges a Critical sheet's caution symbol only with an explicit one.
+        if let Some(icon) =
+            objc2_app_kit::NSApplication::sharedApplication(self.1).applicationIconImage()
+        {
+            // SAFETY: The icon is a live image, so the setter never receives nil.
+            unsafe { alert.setIcon(Some(&icon)) };
+        }
         let message = NSString::from_str(msg);
         alert.setMessageText(message.as_ref());
 
