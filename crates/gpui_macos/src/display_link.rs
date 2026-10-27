@@ -292,6 +292,12 @@ impl WindowFrameSource {
         Ok(())
     }
 
+    /// Requests one frame on the next main-queue turn without waiting for
+    /// the next vsync tick. It coalesces with a pending tick.
+    pub fn signal(&self) {
+        self.frame_requests.merge_data(1);
+    }
+
     pub fn stop(&mut self) {
         if let Some((display_id, subscriber_id)) = self.registration.take() {
             unsubscribe(display_id, subscriber_id);

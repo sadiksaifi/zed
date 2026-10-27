@@ -77,7 +77,7 @@ use std::{
         Arc, Once, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
@@ -695,6 +695,8 @@ struct MacWindowState {
     // Whether a frame request callback is running. Demand raised during the
     // callback is reconciled after it returns.
     frame_running: bool,
+    // When the last frame request callback started.
+    last_frame_at: Option<Instant>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -894,7 +896,9 @@ impl MacWindowState {
         }
     }
 
-    /// Records frame demand and starts the display link if the window can draw.
+    /// Records frame demand and starts the display link if the window can draw. When no
+    /// frame started within the last refresh interval, the frame draws without waiting for
+    /// the next vsync tick.
     fn request_frame(&mut self) {
         if self.closed.load(Ordering::Acquire) {
             return;
@@ -930,10 +934,30 @@ impl MacWindowState {
             return;
         };
         let data = self.native_view.as_ptr() as *mut c_void;
-        self.frame_source
-            .get_or_insert_with(|| WindowFrameSource::new(data, step))
-            .start(display_id)
-            .log_err();
+        let draw_now = frame_overdue(self.last_frame_at, Instant::now(), self.refresh_interval());
+        let frame_source = self
+            .frame_source
+            .get_or_insert_with(|| WindowFrameSource::new(data, step));
+        if frame_source.start(display_id).log_err().is_some() && draw_now {
+            // A running link would hold this frame until its next tick, although the
+            // display has already shown the last one.
+            frame_source.signal();
+        }
+    }
+
+    /// The shortest interval between two refreshes of the window's display.
+    fn refresh_interval(&self) -> Duration {
+        let screen = unsafe { self.native_window.screen() };
+        let seconds: f64 = if screen == nil {
+            0.0
+        } else {
+            unsafe { msg_send![screen, minimumRefreshInterval] }
+        };
+        if seconds.is_finite() && seconds > 0.0 {
+            Duration::from_secs_f64(seconds)
+        } else {
+            DEFAULT_REFRESH_INTERVAL
+        }
     }
 
     fn stop_display_link(&mut self) {
@@ -1149,6 +1173,7 @@ impl MacWindow {
                 frame_source: None,
                 frame_requested: true,
                 frame_running: false,
+                last_frame_at: None,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -3670,6 +3695,15 @@ enum FrameDriver {
     AppKit,
 }
 
+const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_micros(16_667);
+
+/// Whether a frame request should draw on the next main-queue turn instead of
+/// waiting for the display link's next tick: no frame started within the last
+/// refresh interval, so drawing now cannot outpace the display.
+fn frame_overdue(last_frame_at: Option<Instant>, now: Instant, refresh_interval: Duration) -> bool {
+    last_frame_at.is_none_or(|last| now.saturating_duration_since(last) >= refresh_interval)
+}
+
 fn run_frame(window_state: &Mutex<MacWindowState>, driver: FrameDriver) {
     let mut lock = window_state.lock();
     if lock.closed.load(Ordering::Acquire) {
@@ -3692,6 +3726,7 @@ fn run_frame(window_state: &Mutex<MacWindowState>, driver: FrameDriver) {
     };
     lock.frame_requested = false;
     lock.frame_running = true;
+    lock.last_frame_at = Some(Instant::now());
     if driver == FrameDriver::AppKit {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
@@ -4384,5 +4419,16 @@ mod tests {
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
         assert_eq!(display_id_for_screen(nil), None);
+    }
+
+    #[test]
+    fn frames_draw_immediately_only_after_a_refresh_interval_without_one() {
+        let interval = Duration::from_micros(8_333);
+        let now = Instant::now();
+        assert!(frame_overdue(None, now, interval));
+        assert!(frame_overdue(Some(now - interval), now, interval));
+        assert!(frame_overdue(Some(now - interval * 3), now, interval));
+        assert!(!frame_overdue(Some(now - interval / 2), now, interval));
+        assert!(!frame_overdue(Some(now), now, interval));
     }
 }
