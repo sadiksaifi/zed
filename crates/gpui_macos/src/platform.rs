@@ -1299,18 +1299,21 @@ unsafe fn get_mac_platform(object: &mut Object) -> &MacPlatform {
 
 extern "C" fn will_finish_launching(_this: &mut Object, _: Sel, _: id) {
     unsafe {
+        // AppKit's AutoFill heuristic controller evaluates every focused text input context
+        // and can start the AutoFill service for it. It caused slowdown and high CPU use in
+        // terminals (https://github.com/ghostty-org/ghostty/pull/8625). On macOS 26, the
+        // undocumented `NSAutoFillHeuristicsEnabled` default turns the controller off. AppKit
+        // reads it once, when a view first takes focus. Registered defaults last for this
+        // process only, and a value the user saves still overrides this one.
+        let key = ns_string("NSAutoFillHeuristicsEnabled");
+        let disabled: id = msg_send![class!(NSNumber), numberWithBool: NO];
+        let defaults: id = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObject: disabled
+            forKey: key
+        ];
         let user_defaults: id = msg_send![class!(NSUserDefaults), standardUserDefaults];
-
-        // The autofill heuristic controller causes slowdown and high CPU usage.
-        // We don't know exactly why. This disables the full heuristic controller.
-        //
-        // Adapted from: https://github.com/ghostty-org/ghostty/pull/8625
-        let name = ns_string("NSAutoFillHeuristicControllerEnabled");
-        let existing_value: id = msg_send![user_defaults, objectForKey: name];
-        if existing_value == nil {
-            let false_value: id = msg_send![class!(NSNumber), numberWithBool:false];
-            let _: () = msg_send![user_defaults, setObject: false_value forKey: name];
-        }
+        let _: () = msg_send![user_defaults, registerDefaults: defaults];
     }
 }
 
